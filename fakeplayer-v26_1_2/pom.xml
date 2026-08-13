@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.github.hello09x.fakeplayer</groupId>
+        <artifactId>fakeplayer-parent</artifactId>
+        <version>${revision}</version>
+    </parent>
+
+    <artifactId>fakeplayer-v26_1_2</artifactId>
+
+    <properties>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <!--
+        Scaffold module for the Minecraft 26.x version format (e.g. 26.1.2).
+
+        It depends only on paper/fakeplayer-api/core (no spigot NMS jar, no
+        specialsource remapping) so the fork compiles and the ServiceLoader picks
+        it up when Bukkit reports version "26.1.2". The bridge deliberately throws
+        on the NMS factory methods until the actual 26.1.2 NMS surface is mapped.
+
+        To finish support for 26.1.2:
+          1. `java -jar BuildTools.jar --rev 26.1.2 --remapped` to install
+             `spigot:26.1.2-R0.1-SNAPSHOT:remapped-mojang`, the maps-mojang and
+             maps-spigot artifacts.
+          2. Determine the new CraftBukkit package revision for 26.1.2
+             (probably v26_1_R1 / similar) and copy the impl classes from the most
+             recent matching module under a new spi package, updating the imports.
+          3. Replace the throwing methods below with the real factory impls.
+    -->
+
+    <dependencies>
+        <dependency>
+            <groupId>io.papermc.paper</groupId>
+            <artifactId>paper-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.github.hello09x.fakeplayer</groupId>
+            <artifactId>fakeplayer-core</artifactId>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>io.github.hello09x.fakeplayer</groupId>
+            <artifactId>fakeplayer-api</artifactId>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+</project>

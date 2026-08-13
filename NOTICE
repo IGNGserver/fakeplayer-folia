@@ -1,0 +1,29 @@
+fakeplayer-folia
+
+This product is a derived work of minecraft-fakeplayer
+(https://github.com/tanyaofei/minecraft-fakeplayer) authored by hello09x /
+tanyaofei and distributed under the Apache License, Version 2.0.
+
+Notable changes made in this fork:
+  * Folia support: every BukkitScheduler call is routed through a reflective
+    scheduler abstraction (io.github.hello09x.fakeplayer.core.util.scheduler.Tasks)
+    that dispatches to the EntityScheduler / RegionScheduler /
+    GlobalRegionScheduler / AsyncScheduler on Folia, and falls back to the Bukkit
+    main-thread scheduler on Paper/Purpur.
+  * Refactored ActionManager to use per-region timers instead of a single global
+    tick timer.
+  * Added the plugin flag `folia-supported: true`.
+  * Added version modules for Minecraft 1.21.11 and the new 26.x version format.
+
+The upstream copyright notices and license are preserved in LICENSE.txt.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
