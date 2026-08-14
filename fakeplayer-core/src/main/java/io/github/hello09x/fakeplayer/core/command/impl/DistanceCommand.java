@@ -5,6 +5,7 @@ import dev.jorel.commandapi.exceptions.WrapperCommandSyntaxException;
 import dev.jorel.commandapi.executors.CommandArguments;
 import io.github.hello09x.fakeplayer.core.util.Mth;
 import org.bukkit.entity.Player;
+import org.bukkit.Location;
 import org.jetbrains.annotations.NotNull;
 import org.joml.Math;
 
@@ -22,11 +23,14 @@ public class DistanceCommand extends AbstractCommand {
      */
     public void distance(@NotNull Player sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = super.getFakeplayer(sender, args);
-        var from = fake.getLocation().toBlockLocation();
         var to = sender.getLocation().toBlockLocation();
+        callOnFake(fake, () -> fake.getLocation().toBlockLocation())
+                .thenAccept(from -> sendDistance(sender, fake, from, to));
+    }
 
+    private void sendDistance(@NotNull Player sender, @NotNull Player fake, @NotNull Location from, @NotNull Location to) {
         if (!Objects.equals(from.getWorld(), to.getWorld())) {
-            sender.sendMessage(translatable(
+            sendTo(sender, translatable(
                     "fakeplayer.command.distance.error.too-far",
                     text(fake.getName(), WHITE)
             ));
@@ -38,7 +42,7 @@ public class DistanceCommand extends AbstractCommand {
         var y = Math.abs(from.getBlockY() - to.getBlockY());
         var z = Math.abs(from.getBlockZ() - to.getBlockZ());
 
-        sender.sendMessage(textOfChildren(
+        sendTo(sender, textOfChildren(
                 translatable(
                         "fakeplayer.command.distance.title",
                         text(fake.getName(), WHITE)

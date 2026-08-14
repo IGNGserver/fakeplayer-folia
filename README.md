@@ -28,8 +28,8 @@ plugin behaves like upstream on Paper while being region-thread-safe on Folia.
 
 ## Requirements
 
-+ [Paper](https://papermc.io) or [Purpur](http://purpurmc.org) software
-+ [CommandAPI](https://commandapi.jorel.dev) Plugin (Any version **except** `10.0.0`)
++ [Paper](https://papermc.io), [Purpur](http://purpurmc.org), or [Folia](https://github.com/PaperMC/Folia)
++ [CommandAPI](https://commandapi.jorel.dev) Plugin `11.0.0`
 
 ## Config file
 

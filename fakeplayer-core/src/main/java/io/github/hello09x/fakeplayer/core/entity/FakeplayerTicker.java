@@ -73,6 +73,9 @@ public class FakeplayerTicker {
             return;
         }
 
+        // Publish a safe snapshot for global-region commands and integrations.
+        player.updateLocationSnapshot();
+
         if (this.removeAt != NON_REMOVE_AT && this.player.getTickCount() % 20 == 0 && System.currentTimeMillis() > removeAt) {
             Main.getInjector().getInstance(FakeplayerManager.class).remove(player.getName(), "lifespan ends");
             this.stop();
@@ -109,9 +112,19 @@ public class FakeplayerTicker {
 
         handle.doTick();
 
-        // clearFog 插件会在第一次传送的时候改变了玩家的位置, 因此必须进行一次传送
-        player.teleport(new Location(player.getWorld(), x, y, z, player.getLocation().getYaw(), player.getLocation().getPitch()));
-        handle.absMoveTo(x, y, z, player.getLocation().getYaw(), player.getLocation().getPitch());
+        // clearFog 插件会在第一次传送的时候改变了玩家的位置, 因此必须进行一次传送.
+        // Folia requires the asynchronous entity teleport API for this operation.
+        var location = new Location(player.getWorld(), x, y, z, player.getLocation().getYaw(), player.getLocation().getPitch());
+        if (Tasks.isFolia()) {
+            player.teleportAsync(location).thenAccept(success -> {
+                if (success) {
+                    Tasks.run(Main.getInstance(), player, () -> handle.absMoveTo(x, y, z, location.getYaw(), location.getPitch()));
+                }
+            });
+        } else {
+            player.teleport(location);
+            handle.absMoveTo(x, y, z, location.getYaw(), location.getPitch());
+        }
         this.firstTick = false;
     }
 

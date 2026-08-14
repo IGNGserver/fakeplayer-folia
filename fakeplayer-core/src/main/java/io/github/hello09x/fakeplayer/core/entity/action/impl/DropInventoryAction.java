@@ -17,7 +17,7 @@ public class DropInventoryAction implements Action {
     @Override
     public boolean tick() {
         var inventory = player.getPlayer().getInventory();
-        for (int i = inventory.getSize(); i >= 0; i--) {
+        for (int i = inventory.getSize() - 1; i >= 0; i--) {
             player.drop(i, false, true);
         }
         player.resetLastActionTime();

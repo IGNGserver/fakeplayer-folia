@@ -30,32 +30,36 @@ public class CmdCommand extends AbstractCommand {
         var command = Objects.requireNonNull((CommandResult) args.get("command"));
 
         var name = command.command().getName();
-        if (!sender.hasPermission(Permission.cmd) && !config.getAllowCommands().contains(name)) {
-            sender.sendMessage(translatable("fakeplayer.command.cmd.error.no-permission", RED));
-            return;
-        }
+        var senderIsOp = sender.isOp();
+        var senderCanUseCmd = sender.hasPermission(Permission.cmd);
+        runOnFake(fake, () -> {
+            if (!senderCanUseCmd && !config.getAllowCommands().contains(name)) {
+                sendTo(sender, translatable("fakeplayer.command.cmd.error.no-permission", RED));
+                return;
+            }
 
-        if (!sender.isOp() && (name.equals("fakeplayer") || name.equals("fp"))) {
-            sender.sendMessage(translatable("fakeplayer.command.cmd.error.no-permission", RED));
-            return;
-        }
+            if (!senderIsOp && (name.equals("fakeplayer") || name.equals("fp"))) {
+                sendTo(sender, translatable("fakeplayer.command.cmd.error.no-permission", RED));
+                return;
+            }
 
-        if (!command.command().testPermission(fake)) {
-            sender.sendMessage(translatable("fakeplayer.command.cmd.error.fakeplayer-has-no-permission", text(fake.getName())).color(RED));
-            return;
-        }
+            if (!command.command().testPermission(fake)) {
+                sendTo(sender, translatable("fakeplayer.command.cmd.error.fakeplayer-has-no-permission", text(fake.getName())).color(RED));
+                return;
+            }
 
-        if (!command.execute(fake)) {
-            sender.sendMessage(translatable("fakeplayer.command.cmd.error.execute-failed", RED));
-            return;
-        }
+            if (!command.execute(fake)) {
+                sendTo(sender, translatable("fakeplayer.command.cmd.error.execute-failed", RED));
+                return;
+            }
 
-        sender.sendMessage(translatable(
-                "fakeplayer.command.generic.success",
-                GRAY
-        ));
+            sendTo(sender, translatable(
+                    "fakeplayer.command.generic.success",
+                    GRAY
+            ));
 
-        log.info("%s issued server command: %s".formatted(fake.getName(), stringifyCommand(command)));
+            log.info("%s issued server command: %s".formatted(fake.getName(), stringifyCommand(command)));
+        });
     }
 
     private static @NotNull String stringifyCommand(@NotNull CommandResult command) {

@@ -25,7 +25,7 @@ public class RotationCommand extends AbstractCommand {
     public void lookAt(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = getFakeplayer(sender, args);
         var location = Objects.requireNonNull((Location) args.get("location"));
-        fake.lookAt(location, LookAnchor.EYES);
+        runOnFake(fake, () -> fake.lookAt(location, LookAnchor.EYES));
     }
 
     /**
@@ -34,17 +34,19 @@ public class RotationCommand extends AbstractCommand {
     public CommandExecutor look(@NotNull Direction direction) {
         return (sender, args) -> {
             var fake = getFakeplayer(sender, args);
-            look(fake, direction);
+            runOnFake(fake, () -> look(fake, direction));
         };
     }
 
     @SuppressWarnings("UnstableApiUsage")
     public void lookMe(@NotNull Player sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException{
         var fake = getFakeplayer(sender, args);
-        if (!Objects.equals(fake.getWorld(), sender.getWorld())) {
-            return;
-        }
-        fake.lookAt(sender.getEyeLocation(), LookAnchor.EYES);
+        var eyeLocation = sender.getEyeLocation();
+        runOnFake(fake, () -> {
+            if (Objects.equals(fake.getWorld(), eyeLocation.getWorld())) {
+                fake.lookAt(eyeLocation, LookAnchor.EYES);
+            }
+        });
     }
 
     /**
@@ -79,7 +81,7 @@ public class RotationCommand extends AbstractCommand {
     public CommandExecutor turn(float yaw, float pitch) {
         return (sender, args) -> {
             var fake = getFakeplayer(sender, args);
-            this.turn(fake, yaw, pitch);
+            runOnFake(fake, () -> this.turn(fake, yaw, pitch));
         };
     }
 
@@ -89,7 +91,7 @@ public class RotationCommand extends AbstractCommand {
     public void turnTo(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = getFakeplayer(sender, args);
         var rotation = Objects.requireNonNull((Rotation) args.get("rotation"));
-        this.turn(fake, rotation.getYaw(), rotation.getPitch());
+        runOnFake(fake, () -> this.turn(fake, rotation.getYaw(), rotation.getPitch()));
     }
 
     /**

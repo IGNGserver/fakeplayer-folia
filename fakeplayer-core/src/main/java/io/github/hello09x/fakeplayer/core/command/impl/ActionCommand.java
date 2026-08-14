@@ -42,18 +42,21 @@ public class ActionCommand extends AbstractCommand {
             @NotNull ActionSetting setting
     ) throws WrapperCommandSyntaxException {
         var fake = super.getFakeplayer(sender, args);
-        if (action == ActionType.USE
-                && fake.getInventory().getItemInMainHand().getType() == Material.FISHING_ROD
-                && autofishManager.isAutofish(fake)
-        ) {
-            // 如果是自动钓鱼则改为 1 次
-            setting = ActionSetting.once();
-        }
+        runOnFake(fake, () -> {
+            var actualSetting = setting;
+            if (action == ActionType.USE
+                    && fake.getInventory().getItemInMainHand().getType() == Material.FISHING_ROD
+                    && autofishManager.isAutofish(fake)
+            ) {
+                // 如果是自动钓鱼则改为 1 次
+                actualSetting = ActionSetting.once();
+            }
 
-        actionManager.setAction(fake, action, setting);
-        if (!setting.equals(ActionSetting.once()) || sender instanceof ConsoleCommandSender) {
-            sender.sendMessage(translatable("fakeplayer.command.generic.success"));
-        }
+            actionManager.setAction(fake, action, actualSetting);
+            if (!actualSetting.equals(ActionSetting.once()) || sender instanceof ConsoleCommandSender) {
+                sendTo(sender, translatable("fakeplayer.command.generic.success"));
+            }
+        });
     }
 
 }

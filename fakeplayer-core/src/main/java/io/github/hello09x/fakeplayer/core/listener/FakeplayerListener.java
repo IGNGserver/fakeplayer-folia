@@ -125,11 +125,16 @@ public class FakeplayerListener implements Listener {
         if (!config.isKickOnDead()) {
             var creator = manager.getCreator(player);
             if (creator != null) {
-                creator.sendMessage(translatable(
+                var message = translatable(
                         "fakeplayer.listener.death.notify",
                         text(player.getName(), GOLD),
                         text("/fp respawn", DARK_GREEN, UNDERLINED).clickEvent(runCommand("/fp respawn " + player.getName()))
-                ).color(RED));
+                ).color(RED);
+                if (Tasks.isFolia() && creator instanceof Player creatorPlayer) {
+                    Tasks.run(Main.getInstance(), creatorPlayer, () -> creator.sendMessage(message));
+                } else {
+                    creator.sendMessage(message);
+                }
             }
             return;
         }

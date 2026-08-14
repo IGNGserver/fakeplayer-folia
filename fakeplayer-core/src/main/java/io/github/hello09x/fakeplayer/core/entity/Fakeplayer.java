@@ -14,6 +14,7 @@ import io.github.hello09x.fakeplayer.core.manager.FakeplayerReplenishManager;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerSkinManager;
 import io.github.hello09x.fakeplayer.core.manager.action.ActionManager;
 import io.github.hello09x.fakeplayer.core.manager.naming.SequenceName;
+import io.github.hello09x.fakeplayer.core.repository.model.Feature;
 import io.github.hello09x.fakeplayer.core.util.Attributes;
 import io.github.hello09x.fakeplayer.core.util.InternalAddressGenerator;
 import lombok.Getter;
@@ -81,7 +82,10 @@ public class Fakeplayer {
 
     @Getter
     @UnknownNullability
-    private NMSNetwork network;
+    private volatile NMSNetwork network;
+
+    /** Last region-thread-owned location made available to global/command code. */
+    private volatile Location locationSnapshot;
 
     /**
      * @param creator      创建者
@@ -95,20 +99,27 @@ public class Fakeplayer {
             @NotNull SequenceName sequenceName,
             long lifespan
     ) {
+        this(creator, creatorIp, sequenceName, lifespan, Bukkit.getWorlds().get(0).getSpawnLocation());
+    }
+
+    public Fakeplayer(
+            @NotNull CommandSender creator,
+            @NotNull String creatorIp,
+            @NotNull SequenceName sequenceName,
+            long lifespan,
+            @NotNull Location initialLocation
+    ) {
         this.name = sequenceName.name();
         this.uuid = sequenceName.uuid();
 
         this.creator = creator;
         this.creatorIp = creatorIp;
         this.sequenceName = sequenceName;
-        this.handle = bridge.fromServer(Bukkit.getServer()).newPlayer(uuid, name);
+        this.handle = bridge.fromServer(Bukkit.getServer()).newPlayer(uuid, name, initialLocation.getWorld());
         this.player = handle.getPlayer();
+        this.locationSnapshot = initialLocation.clone();
 
         this.ticker = new FakeplayerTicker(this, lifespan);
-        this.player.setPersistent(config.isPersistData());
-        this.player.setSleepingIgnored(true);
-        this.handle.setPlayBefore(); // 可避免一些插件的第一次入服欢迎信息
-        this.handle.disableAdvancements(Main.getInstance()); // 不提示成就信息
     }
 
     /**
@@ -116,7 +127,6 @@ public class Fakeplayer {
      */
     public CompletableFuture<Void> spawnAsync(@NotNull SpawnOption option) {
         var address = ipGen.next();
-        this.player.setMetadata(MetadataKeys.SPAWNED_AT, new FixedMetadataValue(Main.getInstance(), Bukkit.getCurrentTick()));
         return Tasks
                 .runAsync(Main.getInstance(), () -> {
                     var event = this.callPreLoginEvent(address);
@@ -128,7 +138,13 @@ public class Fakeplayer {
                         ).color(RED));
                     }
                 })
-                .thenComposeAsync(nul -> Tasks.callAt(Main.getInstance(), option.spawnAt(), () -> {
+                .thenComposeAsync(nul -> Tasks.<CompletableFuture<Void>>callAt(Main.getInstance(), option.spawnAt(), () -> {
+                    this.player.setPersistent(config.isPersistData());
+                    this.player.setSleepingIgnored(true);
+                    this.handle.setPlayBefore(); // 可避免一些插件的第一次入服欢迎信息
+                    this.handle.disableAdvancements(Main.getInstance()); // 不提示成就信息
+                    this.player.setMetadata(MetadataKeys.SPAWNED_AT, new FixedMetadataValue(Main.getInstance(), Bukkit.getCurrentTick()));
+
                     {
                         var event = this.callLoginEvent(address);
                         if (event.getResult() != PlayerLoginEvent.Result.ALLOWED && config.getPreventKicking().ordinal() < PreventKicking.ON_SPAWNING.ordinal()) {
@@ -153,8 +169,15 @@ public class Fakeplayer {
                     if (option.lookAtEntity()) {
                         actionManager.setAction(player, ActionType.LOOK_AT_NEAREST_ENTITY, ActionSetting.continuous());
                     }
+                    if (option.wolverine()) {
+                        Feature.wolverine.getModifier().accept(player, "true");
+                    }
                     if (option.skin()) {
-                        skinManager.useDefaultSkin(creator, player);
+                        if (Tasks.isFolia()) {
+                            skinManager.useDefaultSkinAsync(creator, player);
+                        } else {
+                            skinManager.useDefaultSkin(creator, player);
+                        }
                     }
                     if (option.replenish()) {
                         replenishManager.setReplenish(player, true);
@@ -164,7 +187,7 @@ public class Fakeplayer {
                     }
 
                     this.network = bridge.createNetwork(address);
-                    this.network.placeNewPlayer(Bukkit.getServer(), this.player);
+                    this.network.placeNewPlayer(Bukkit.getServer(), this.player, option.spawnAt());
                     this.player.setHealth(Optional.ofNullable(this.player.getAttribute(Attributes.maxHealth()))
                                                   .map(AttributeInstance::getValue)
                                                   .orElse(20D));    // 恢复生命值
@@ -172,10 +195,22 @@ public class Fakeplayer {
                     this.setupName();
                     this.handle.setupClientOptions();   // 处理皮肤设置问题
 
-                    this.teleportToSpawnpoint(option.spawnAt().clone());
-                    this.ticker.start(Main.getInstance());
-                    return null;
-                }));
+                    return this.teleportToSpawnpoint(option.spawnAt().clone()).thenCompose(success -> {
+                        if (!success) {
+                            return CompletableFuture.failedFuture(new CommandException(translatable(
+                                    "fakeplayer.command.spawn.error.teleport-failed",
+                                    text(player.getName(), WHITE)
+                            ).color(RED)));
+                        }
+
+                        // A failed teleport must not leave a live ticker behind.
+                        // The completion may run after the entity has moved to a
+                        // different Folia region, so schedule the start again
+                        // through the entity scheduler.
+                        Tasks.run(Main.getInstance(), this.player, () -> this.ticker.start(Main.getInstance()));
+                        return CompletableFuture.completedFuture(null);
+                    });
+                })).thenCompose(future -> future);
     }
 
     /**
@@ -183,31 +218,115 @@ public class Fakeplayer {
      *
      * @param to 目标位置
      */
-    private void teleportToSpawnpoint(@NotNull Location to) {
+    private CompletableFuture<Boolean> teleportToSpawnpoint(@NotNull Location to) {
+        if (Tasks.isFolia()) {
+            return this.teleportFolia(to);
+        }
+
         var from = this.player.getLocation();
         if (from.getWorld().equals(to.getWorld())) {
             // 如果生成世界等于目的世界, 则需要穿越一次维度才能获取刷怪能力
             var otherWorld = WorldUtils.getOtherWorld(from.getWorld());
             if (otherWorld == null || !player.teleport(otherWorld.getSpawnLocation())) {
-                this.creator.sendMessage(translatable(
+                this.sendCreatorMessage(translatable(
                         "fakeplayer.command.spawn.error.no-mob-spawning-ability",
                         text(player.getName(), WHITE)
                 ).color(GRAY));
             }
         }
 
-        Tasks.run(Main.getInstance(), this.player, () -> {
+        return Tasks.call(Main.getInstance(), this.player, () -> {
             if (!EntityUtils.teleportAndSound(player, to)) {
-                this.creator.sendMessage(translatable(
+                this.sendCreatorMessage(translatable(
+                        "fakeplayer.command.spawn.error.teleport-failed",
+                        text(player.getName(), WHITE)
+                ).color(GRAY));
+                return false;
+            }
+            return true;
+        });
+    }
+
+    /**
+     * Entity#teleport is not a supported cross-region operation on Folia.
+     * Use the region-aware asynchronous API and only report the result after
+     * the entity has been placed in its destination region.
+     */
+    private CompletableFuture<Boolean> teleportFolia(@NotNull Location to) {
+        var from = this.player.getLocation();
+        CompletableFuture<Boolean> movement;
+        if (from.getWorld().equals(to.getWorld())) {
+            var otherWorld = WorldUtils.getOtherWorld(from.getWorld());
+            if (otherWorld == null) {
+                this.sendCreatorMessage(translatable(
+                        "fakeplayer.command.spawn.error.no-mob-spawning-ability",
+                        text(player.getName(), WHITE)
+                ).color(GRAY));
+                return CompletableFuture.completedFuture(false);
+            }
+
+            movement = this.player.teleportAsync(otherWorld.getSpawnLocation())
+                    .thenCompose(success -> success
+                            ? this.player.teleportAsync(to)
+                            : CompletableFuture.completedFuture(false));
+        } else {
+            movement = this.player.teleportAsync(to);
+        }
+
+        movement.thenAccept(success -> {
+            if (!success) {
+                this.sendCreatorMessage(translatable(
                         "fakeplayer.command.spawn.error.teleport-failed",
                         text(player.getName(), WHITE)
                 ).color(GRAY));
             }
         });
+        return movement;
+    }
+
+    private void sendCreatorMessage(@NotNull net.kyori.adventure.text.Component message) {
+        if (this.creator instanceof Player creatorPlayer && Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), creatorPlayer, () -> this.creator.sendMessage(message));
+        } else {
+            this.creator.sendMessage(message);
+        }
     }
 
     public boolean isOnline() {
         return this.player.isOnline();
+    }
+
+    /**
+     * Stop region work and release the synthetic network. This method contains
+     * no Bukkit entity mutation and is therefore safe to call from a failed
+     * asynchronous spawn completion as well as from the quit cleanup path.
+     */
+    public void close() {
+        this.ticker.stop();
+        try {
+            actionManager.cleanup(this.player);
+        } catch (Throwable ignored) {
+            // A retired Folia entity scheduler must not prevent the network
+            // itself from being released below.
+        }
+        var currentNetwork = this.network;
+        this.network = null;
+        if (currentNetwork != null) {
+            try {
+                currentNetwork.close();
+            } catch (Throwable ignored) {
+                // Cleanup is best-effort after a failed login/quit.
+            }
+        }
+    }
+
+    public @NotNull Location getLocationSnapshot() {
+        return this.locationSnapshot.clone();
+    }
+
+    /** Called only from the fake player's owning region thread. */
+    public void updateLocationSnapshot() {
+        this.locationSnapshot = this.player.getLocation().clone();
     }
 
     public int getTickCount() {

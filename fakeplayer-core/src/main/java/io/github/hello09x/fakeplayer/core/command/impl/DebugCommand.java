@@ -7,6 +7,7 @@ import dev.jorel.commandapi.executors.CommandArguments;
 import io.github.hello09x.fakeplayer.api.spi.NMSBridge;
 import io.github.hello09x.fakeplayer.core.Main;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerManager;
+import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -32,12 +33,17 @@ public class DebugCommand {
     public void sendPluginMessage(@NotNull CommandSender sender, @NotNull CommandArguments args) {
         var player = (Player) args.get("player");
         var channel = (String) args.get("channel");
-        var message = (String) args.get("message");
+        var messageText = (String) args.get("message");
         Bukkit.getServer().getMessenger().registerOutgoingPluginChannel(Main.getInstance(), channel);
 
         var msg = ByteStreams.newDataOutput();
-        msg.writeUTF(message);
-        player.sendPluginMessage(Main.getInstance(), channel, msg.toByteArray());
+        msg.writeUTF(messageText);
+        byte[] message = msg.toByteArray();
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), player, () -> player.sendPluginMessage(Main.getInstance(), channel, message));
+        } else {
+            player.sendPluginMessage(Main.getInstance(), channel, message);
+        }
     }
 
 }

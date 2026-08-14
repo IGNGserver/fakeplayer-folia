@@ -12,6 +12,7 @@ import io.github.hello09x.fakeplayer.core.command.impl.ActionCommand;
 import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerManager;
 import io.github.hello09x.fakeplayer.core.repository.model.Feature;
+import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
@@ -69,7 +70,10 @@ public abstract class CommandSupports {
             var target = sender.isOp()
                     ? manager.get(info.currentInput())
                     : manager.get(sender, info.currentInput());
-            if (predicate != null && target != null && !predicate.test(target)) {
+            // Entity state predicates must run on the target region under Folia;
+            // command parsing can happen on the sender's region. The handlers
+            // perform the final state check after dispatching to the fake player.
+            if (!Tasks.isFolia() && predicate != null && target != null && !predicate.test(target)) {
                 target = null;
             }
             return target;
@@ -78,8 +82,8 @@ public abstract class CommandSupports {
             var arg = info.currentArg();
 
             var targets = sender.isOp()
-                    ? manager.getAll(predicate)
-                    : manager.getAll(sender, predicate);
+                    ? manager.getAll(Tasks.isFolia() ? null : predicate)
+                    : manager.getAll(sender, Tasks.isFolia() ? null : predicate);
 
             var names = targets.stream().map(Player::getName);
             if (!arg.isEmpty()) {

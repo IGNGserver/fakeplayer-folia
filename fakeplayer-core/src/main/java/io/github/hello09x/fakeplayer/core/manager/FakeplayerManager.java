@@ -34,9 +34,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
 
@@ -56,7 +54,12 @@ public class FakeplayerManager {
     private final FakeplayerFeatureManager featureManager;
     private final NMSBridge nms;
     private final FakeplayerConfig config;
-    private final ScheduledExecutorService lagMonitor;
+    private final Tasks.Task lagMonitor;
+    /**
+     * Console commands are executed on Folia's global region. Keep a tail per
+     * fake player so post-spawn/post-quit hooks cannot overtake one another.
+     */
+    private final ConcurrentHashMap<UUID, CompletableFuture<Void>> commandChains = new ConcurrentHashMap<>();
 
     @Inject
     public FakeplayerManager(NameManager nameManager, FakeplayerList playerList, FakeplayerFeatureManager featureManager, NMSBridge nms, FakeplayerConfig config) {
@@ -66,16 +69,20 @@ public class FakeplayerManager {
         this.nms = nms;
         this.config = config;
 
-        this.lagMonitor = Executors.newSingleThreadScheduledExecutor();
-        this.lagMonitor.scheduleWithFixedDelay(() -> {
-                                                   if (Bukkit.getServer().getTPS()[1] < config.getKaleTps()) {
-                                                       Tasks.runGlobal(Main.getInstance(), () -> {
-                                                           if (this.removeAll("low tps") > 0) {
-                                                               Bukkit.broadcast(translatable("fakeplayer.manager.remove-all-on-low-tps", GRAY, ITALIC));
-                                                           }
-                                                       });
-                                                   }
-                                               }, 0, 60, TimeUnit.SECONDS
+        // Bukkit#getTPS is global server state. On Folia it must be read from the global
+        // region; an ordinary ScheduledExecutorService is neither a valid region context nor
+        // a safe place to kick players from multiple regions.
+        this.lagMonitor = Tasks.runAtFixedRateGlobal(
+                Main.getInstance(),
+                () -> {
+                    if (Bukkit.getServer().getTPS()[1] < config.getKaleTps()) {
+                        if (this.removeAll("low tps") > 0) {
+                            Bukkit.broadcast(translatable("fakeplayer.manager.remove-all-on-low-tps", GRAY, ITALIC));
+                        }
+                    }
+                },
+                0,
+                20 * 60
         );
     }
 
@@ -91,39 +98,52 @@ public class FakeplayerManager {
             @NotNull Location spawnAt,
             long lifespan
     ) {
-        this.checkLimit(creator);
+        var spawnLocation = spawnAt.clone();
+        return this.checkLimitAsync(creator).thenCompose(limitIgnored -> {
+            var sequenceName = name == null
+                    ? nameManager.getRegularNameAsync(creator)
+                    : nameManager.getSpecifiedNameAsync(name);
 
-        var sn = name == null ? nameManager.getRegularName(creator) : nameManager.getSpecifiedName(name);
-        log.info("UUID of fake player %s is %s".formatted(sn.name(), sn.uuid()));
-
-        var fp = new Fakeplayer(
-                creator,
-                AddressUtils.getAddress(creator),
-                sn,
-                lifespan
-        );
-
-        var target = fp.getPlayer();    // 即使出现异常也不需要处理这个玩家, 最终会被 GC 掉
-        this.playerList.add(fp);
-
-        this.dispatchCommandsEarly(fp, this.config.getPreSpawnCommands());
-        return CompletableFuture
-                .supplyAsync(() -> {
-                    var configs = featureManager.getFeatures(creator);
-                    return new SpawnOption(
-                            spawnAt,
-                            configs.get(Feature.invulnerable).asBoolean(),
-                            configs.get(Feature.collidable).asBoolean(),
-                            configs.get(Feature.look_at_entity).asBoolean(),
-                            configs.get(Feature.pickup_items).asBoolean(),
-                            configs.get(Feature.skin).asBoolean(),
-                            configs.get(Feature.replenish).asBoolean(),
-                            configs.get(Feature.autofish).asBoolean(),
-                            configs.get(Feature.wolverine).asBoolean()
-                    );
-                })
-                .thenComposeAsync(fp::spawnAsync)
-                .thenApply(ignored -> target);
+            // ServerPlayer construction touches the target world/region. On Folia it
+            // must happen in the region selected by the spawn location, not on the
+            // command sender's region or on an arbitrary completion thread.
+            return sequenceName.thenCompose(sn -> AddressUtils.getAddressAsync(creator)
+                    .thenCompose(creatorIp -> {
+                        log.info("UUID of fake player %s is %s".formatted(sn.name(), sn.uuid()));
+                        return Tasks.callAt(Main.getInstance(), spawnLocation, () -> new Fakeplayer(
+                                creator,
+                                creatorIp,
+                                sn,
+                                lifespan,
+                                spawnLocation
+                        ));
+                    }))
+                    .thenCompose(fp -> {
+                        this.playerList.add(fp);
+                        return this.dispatchCommandsEarly(fp, this.config.getPreSpawnCommands())
+                                .thenCompose(ignored -> {
+                                    var configsFuture = featureManager.getFeaturesAsync(creator);
+                                    return configsFuture.thenApply(configs -> new SpawnOption(
+                                            spawnLocation,
+                                            configs.get(Feature.invulnerable).asBoolean(),
+                                            configs.get(Feature.collidable).asBoolean(),
+                                            configs.get(Feature.look_at_entity).asBoolean(),
+                                            configs.get(Feature.pickup_items).asBoolean(),
+                                            configs.get(Feature.skin).asBoolean(),
+                                            configs.get(Feature.replenish).asBoolean(),
+                                            configs.get(Feature.autofish).asBoolean(),
+                                            configs.get(Feature.wolverine).asBoolean()
+                                    ));
+                                })
+                                .thenComposeAsync(fp::spawnAsync)
+                                .thenApply(ignored -> fp.getPlayer())
+                                .whenComplete((ignored, throwable) -> {
+                                    if (throwable != null) {
+                                        this.rollbackSpawn(fp, throwable);
+                                    }
+                                });
+                    });
+        });
     }
 
     /**
@@ -188,6 +208,15 @@ public class FakeplayerManager {
     }
 
     /**
+     * Return the registry record for a fake player without touching the live
+     * entity. Quit handlers use this snapshot before Folia retires the entity
+     * scheduler, so delayed command hooks can still be formatted safely.
+     */
+    public @Nullable Fakeplayer getRecord(@NotNull Player target) {
+        return this.playerList.getByUUID(target.getUniqueId());
+    }
+
+    /**
      * 根据名称删除假人
      *
      * @param name   名称
@@ -211,7 +240,7 @@ public class FakeplayerManager {
             return false;
         }
 
-        target.kick(textOfChildren(
+        this.kick(target, textOfChildren(
                 text("[fakeplayer] "),
                 reason == null ? text("removed") : reason
         ));
@@ -225,10 +254,27 @@ public class FakeplayerManager {
      */
     public int removeAll(@Nullable String reason) {
         var targets = getAll();
+        var message = text(REMOVAL_REASON_PREFIX + (reason == null ? "removed" : reason));
         for (var target : targets) {
-            target.kick(text(REMOVAL_REASON_PREFIX + (reason == null ? "removed" : reason)));
+            this.kick(target, message);
         }
         return targets.size();
+    }
+
+    /**
+     * Kick a player on the region that owns the player entity. The Paper path stays
+     * synchronous so existing command behaviour is preserved there.
+     */
+    private void kick(@NotNull Player target, @NotNull Component reason) {
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), target, () -> {
+                if (target.isOnline()) {
+                    target.kick(reason);
+                }
+            });
+        } else {
+            target.kick(reason);
+        }
     }
 
     /**
@@ -251,6 +297,17 @@ public class FakeplayerManager {
     }
 
     /**
+     * Returns the location snapshot published by the fake player's region
+     * thread. This is safe to use while formatting global/command output on
+     * Folia; callers that need the live entity should use the entity scheduler.
+     */
+    public @NotNull Location getLocationSnapshot(@NotNull Player target) {
+        return Optional.ofNullable(this.playerList.getByUUID(target.getUniqueId()))
+                .map(Fakeplayer::getLocationSnapshot)
+                .orElseGet(() -> target.getLocation().clone());
+    }
+
+    /**
      * 清理假人
      *
      * @param target 假人
@@ -261,12 +318,19 @@ public class FakeplayerManager {
             return;
         }
         this.nameManager.unregister(fakeplayer.getSequenceName());
-        if (config.isDropInventoryOnQuiting()) {
-            this.nms.createAction(
-                    fakeplayer.getPlayer(),
-                    ActionType.DROP_INVENTORY,
-                    ActionSetting.once()
-            ).tick();
+        try {
+            if (config.isDropInventoryOnQuiting()) {
+                this.nms.createAction(
+                        fakeplayer.getPlayer(),
+                        ActionType.DROP_INVENTORY,
+                        ActionSetting.once()
+                ).tick();
+            }
+        } finally {
+            // PlayerQuitEvent can be followed by a retired entity scheduler on
+            // Folia. Release the synthetic network even when inventory cleanup
+            // is rejected by another plugin.
+            fakeplayer.close();
         }
     }
 
@@ -406,6 +470,20 @@ public class FakeplayerManager {
             return;
         }
 
+        var snapshot = List.copyOf(commands);
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), target, () -> issueCommandsOnEntity(target, snapshot));
+            return;
+        }
+
+        issueCommandsOnEntity(target, snapshot);
+    }
+
+    private void issueCommandsOnEntity(@NotNull Player target, @NotNull List<String> commands) {
+        if (this.isNotFake(target)) {
+            return;
+        }
+
         var p = target.getName();
         var u = target.getUniqueId().toString();
         var c = Objects.requireNonNull(this.getCreatorName(target));
@@ -418,23 +496,16 @@ public class FakeplayerManager {
         }
     }
 
-    public void dispatchCommandsEarly(@NotNull Fakeplayer fp, @NotNull List<String> commands) {
+    public @NotNull CompletableFuture<Void> dispatchCommandsEarly(@NotNull Fakeplayer fp, @NotNull List<String> commands) {
         if (commands.isEmpty()) {
-            return;
+            return CompletableFuture.completedFuture(null);
         }
 
-        var server = Bukkit.getServer();
-        var sender = Bukkit.getConsoleSender();
         var p = fp.getName();
         var u = fp.getUUID().toString();
         var c = fp.getCreator().getName();
-        for (var cmd : Commands.formatCommands(commands, "%p", p, "%u", u, "%c", c)) {
-            if (!server.dispatchCommand(sender, cmd)) {
-                log.warning("Failed to execute command for %s: ".formatted(p) + cmd);
-            } else {
-                log.info("Dispatched command: " + cmd);
-            }
-        }
+        var formatted = Commands.formatCommands(commands, "%p", p, "%u", u, "%c", c);
+        return this.dispatchConsoleCommands(formatted, p);
     }
 
     /**
@@ -448,19 +519,84 @@ public class FakeplayerManager {
             return;
         }
 
-        var server = Bukkit.getServer();
-        var sender = Bukkit.getConsoleSender();
-
-        var p = player.getName();
-        var u = player.getUniqueId().toString();
-        var c = Objects.requireNonNull(this.getCreatorName(player));
-        for (var cmd : Commands.formatCommands(commands, "%p", p, "%u", u, "%c", c)) {
-            if (!server.dispatchCommand(sender, cmd)) {
-                log.warning("Failed to execute command for %s: ".formatted(p) + cmd);
-            } else {
-                log.info("Dispatched command: " + cmd);
-            }
+        // Use the registry object rather than the Bukkit entity. This keeps
+        // post-quit command hooks working after Folia retires the entity's
+        // scheduler, and all values needed for formatting are immutable.
+        var fakeplayer = this.playerList.getByUUID(player.getUniqueId());
+        if (fakeplayer == null) {
+            return;
         }
+
+        this.dispatchCommands(fakeplayer, commands);
+    }
+
+    /**
+     * Dispatch commands using the immutable fake-player record. This overload
+     * remains usable after PlayerQuitEvent has removed the record from the
+     * live-player index.
+     */
+    public void dispatchCommands(@NotNull Fakeplayer fakeplayer, @NotNull List<String> commands) {
+        if (commands.isEmpty()) {
+            return;
+        }
+
+        this.dispatchCommandsAsync(fakeplayer, commands).exceptionally(throwable -> {
+            log.warning("Failed to dispatch fake-player lifecycle commands for " + fakeplayer.getName() + ": " + throwable);
+            return null;
+        });
+    }
+
+    /**
+     * Queue console commands behind commands already submitted for this fake
+     * player. A failed command batch is contained so a later lifecycle hook is
+     * still allowed to run.
+     */
+    public @NotNull CompletableFuture<Void> dispatchCommandsAsync(
+            @NotNull Fakeplayer fakeplayer,
+            @NotNull List<String> commands
+    ) {
+        var previous = this.commandChains.get(fakeplayer.getUUID());
+        if (commands.isEmpty()) {
+            return previous == null ? CompletableFuture.completedFuture(null) : previous.handle((ignored, throwable) -> null);
+        }
+
+        var p = fakeplayer.getName();
+        var u = fakeplayer.getUUID().toString();
+        var c = fakeplayer.getCreator().getName();
+        var formatted = Commands.formatCommands(List.copyOf(commands), "%p", p, "%u", u, "%c", c);
+        return this.commandChains.compute(fakeplayer.getUUID(), (uuid, tail) -> {
+            var ready = tail == null
+                    ? CompletableFuture.<Void>completedFuture(null)
+                    : tail.handle((ignored, throwable) -> null);
+            return ready.thenCompose(ignored -> this.dispatchConsoleCommands(formatted, p));
+        });
+    }
+
+    /** Remove a completed lifecycle command chain after the after-quit hook. */
+    public void clearCommandChain(@NotNull UUID uuid) {
+        this.commandChains.remove(uuid);
+    }
+
+    private @NotNull CompletableFuture<Void> dispatchConsoleCommands(@NotNull List<String> commands, @NotNull String playerName) {
+        Runnable dispatch = () -> {
+            var server = Bukkit.getServer();
+            var sender = Bukkit.getConsoleSender();
+            for (var cmd : commands) {
+                if (!server.dispatchCommand(sender, cmd)) {
+                    log.warning("Failed to execute command for %s: ".formatted(playerName) + cmd);
+                } else {
+                    log.info("Dispatched command: " + cmd);
+                }
+            }
+        };
+        if (Tasks.isFolia()) {
+            return Tasks.callGlobal(Main.getInstance(), () -> {
+                dispatch.run();
+                return null;
+            });
+        }
+        dispatch.run();
+        return CompletableFuture.completedFuture(null);
     }
 
     /**
@@ -468,6 +604,39 @@ public class FakeplayerManager {
      *
      * @param creator 创建者
      */
+    private @NotNull CompletableFuture<Void> checkLimitAsync(@NotNull CommandSender creator) {
+        if (!Tasks.isFolia()) {
+            this.checkLimit(creator);
+            return CompletableFuture.completedFuture(null);
+        }
+
+        if (creator.isOp()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        if (this.playerList.getSize() >= this.config.getServerLimit()) {
+            return CompletableFuture.failedFuture(
+                    new CommandException(translatable("fakeplayer.command.spawn.error.server-limit"))
+            );
+        }
+
+        if (this.playerList.getByCreator(creator.getName()).size() >= this.config.getPlayerLimit()) {
+            return CompletableFuture.failedFuture(
+                    new CommandException(translatable("fakeplayer.command.spawn.error.player-limit"))
+            );
+        }
+
+        if (!this.config.isDetectIp()) {
+            return CompletableFuture.completedFuture(null);
+        }
+
+        return AddressUtils.getAddressAsync(creator).thenAccept(address -> {
+            if (this.countByAddress(address) >= this.config.getPlayerLimit()) {
+                throw new CommandException(translatable("fakeplayer.command.spawn.error.ip-limit"));
+            }
+        });
+    }
+
     private void checkLimit(@NotNull CommandSender creator) throws CommandException {
         if (creator.isOp()) {
             return;
@@ -488,7 +657,39 @@ public class FakeplayerManager {
 
     public void onDisable() {
         Exceptions.suppress(Main.getInstance(), () -> this.removeAll("Plugin disabled"));
-        Exceptions.suppress(Main.getInstance(), this.lagMonitor::shutdownNow);
+        Exceptions.suppress(Main.getInstance(), this.lagMonitor::cancel);
+        this.commandChains.clear();
+    }
+
+    private void rollbackSpawn(@NotNull Fakeplayer fakeplayer, @NotNull Throwable throwable) {
+        this.playerList.remove(fakeplayer);
+        this.nameManager.unregister(fakeplayer.getSequenceName());
+        this.commandChains.remove(fakeplayer.getUUID());
+
+        try {
+            fakeplayer.close();
+        } catch (Throwable closeFailure) {
+            log.warning("Failed to close fake-player resources for " + fakeplayer.getName() + ": " + closeFailure);
+        }
+
+        var player = fakeplayer.getPlayer();
+        var reason = text("[fakeplayer] spawn failed");
+        try {
+            if (Tasks.isFolia()) {
+                Tasks.run(Main.getInstance(), player, () -> {
+                    // Kick even when the login pipeline failed halfway
+                    // through and Bukkit has not published isOnline() yet;
+                    // CraftPlayer#kick is also the cleanup path for a
+                    // partially inserted PlayerList entry.
+                    player.kick(reason);
+                });
+            } else {
+                player.kick(reason);
+            }
+        } catch (Throwable kickFailure) {
+            log.warning("Failed to remove failed fake player " + fakeplayer.getName() + ": " + kickFailure);
+        }
+        log.warning("Failed to spawn fake player " + fakeplayer.getName() + ": " + throwable);
     }
 
 }

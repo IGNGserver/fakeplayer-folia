@@ -1,11 +1,14 @@
 package io.github.hello09x.fakeplayer.core.util;
 
+import io.github.hello09x.fakeplayer.core.Main;
+import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.InetSocketAddress;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * @author tanyaofei
@@ -26,5 +29,16 @@ public class AddressUtils {
         } else {
             return "127.0.0.1";
         }
+    }
+
+    /**
+     * Read a player's connection address from its owning Folia region. The
+     * synchronous method remains available for Paper and legacy integrations.
+     */
+    public static @NotNull CompletableFuture<String> getAddressAsync(@NotNull CommandSender sender) {
+        if (Tasks.isFolia() && sender instanceof Player player) {
+            return Tasks.call(Main.getInstance(), player, () -> getAddress(player));
+        }
+        return CompletableFuture.completedFuture(getAddress(sender));
     }
 }

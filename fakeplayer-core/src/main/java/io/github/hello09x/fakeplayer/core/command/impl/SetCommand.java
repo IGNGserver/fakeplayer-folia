@@ -4,6 +4,8 @@ import com.google.inject.Singleton;
 import dev.jorel.commandapi.exceptions.WrapperCommandSyntaxException;
 import dev.jorel.commandapi.executors.CommandArguments;
 import io.github.hello09x.fakeplayer.core.repository.model.Feature;
+import io.github.hello09x.fakeplayer.core.Main;
+import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.bukkit.command.CommandSender;
 import org.jetbrains.annotations.NotNull;
 
@@ -27,7 +29,11 @@ public class SetCommand extends AbstractCommand {
             return;
         }
 
-        modifier.accept(target, value);
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), target, () -> modifier.accept(target, value));
+        } else {
+            modifier.accept(target, value);
+        }
         sender.sendMessage(translatable(
                 "fakeplayer.command.set.success",
                 text(target.getName(), WHITE),

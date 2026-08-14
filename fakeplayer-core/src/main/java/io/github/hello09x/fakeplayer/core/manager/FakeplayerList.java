@@ -7,14 +7,19 @@ import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.Unmodifiable;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Stream;
 
 @Singleton
 public class FakeplayerList {
 
-    private final Map<String, Fakeplayer> playersByName = new HashMap<>();
-    private final Map<UUID, Fakeplayer> playersByUUID = new HashMap<>();
-    private final Map<String, List<Fakeplayer>> playersByCreator = new HashMap<>();
+    // Player events and Folia region tasks can update this registry from
+    // different region threads. The old HashMaps were safe only on Paper's
+    // single server thread.
+    private final Map<String, Fakeplayer> playersByName = new ConcurrentHashMap<>();
+    private final Map<UUID, Fakeplayer> playersByUUID = new ConcurrentHashMap<>();
+    private final Map<String, CopyOnWriteArrayList<Fakeplayer>> playersByCreator = new ConcurrentHashMap<>();
 
     /**
      * 添加一个假人到假人清单
@@ -24,7 +29,7 @@ public class FakeplayerList {
     public void add(@NotNull Fakeplayer player) {
         this.playersByName.put(player.getName(), player);
         this.playersByUUID.put(player.getUUID(), player);
-        this.playersByCreator.computeIfAbsent(player.getCreator().getName(), key -> new LinkedList<>()).add(player);
+        this.playersByCreator.computeIfAbsent(player.getCreator().getName(), key -> new CopyOnWriteArrayList<>()).add(player);
     }
 
     /**
@@ -34,7 +39,7 @@ public class FakeplayerList {
      * @return 假人
      */
     public @Nullable Fakeplayer getByName(@NotNull String name) {
-        return Optional.ofNullable(this.playersByName.get(name)).map(this::checkOnline).orElse(null);
+        return this.playersByName.get(name);
     }
 
     /**
@@ -44,7 +49,7 @@ public class FakeplayerList {
      * @return 假人
      */
     public @Nullable Fakeplayer getByUUID(@NotNull UUID uuid) {
-        return Optional.ofNullable(this.playersByUUID.get(uuid)).map(this::checkOnline).orElse(null);
+        return this.playersByUUID.get(uuid);
     }
 
     /**
@@ -54,7 +59,10 @@ public class FakeplayerList {
      * @return 假人
      */
     public @NotNull @Unmodifiable List<Fakeplayer> getByCreator(@NotNull String creator) {
-        return Optional.ofNullable(this.playersByCreator.get(creator)).map(Collections::unmodifiableList).orElse(Collections.emptyList());
+        return Optional.ofNullable(this.playersByCreator.get(creator))
+                .map(List::copyOf)
+                .map(Collections::unmodifiableList)
+                .orElse(Collections.emptyList());
     }
 
     /**
@@ -62,10 +70,19 @@ public class FakeplayerList {
      *
      * @param player 假人
      */
-    public void remove(@NotNull Fakeplayer player) {
-        this.playersByName.remove(player.getName());
-        this.playersByUUID.remove(player.getUUID());
-        Optional.ofNullable(this.playersByCreator.get(player.getCreator().getName())).map(players -> players.remove(player));
+    public boolean remove(@NotNull Fakeplayer player) {
+        // Remove by identity. A failed spawn can overlap with a later spawn
+        // using the same name/UUID, and an unconditional key removal would
+        // delete the newer record from the registry.
+        boolean removed = this.playersByName.remove(player.getName(), player);
+        removed |= this.playersByUUID.remove(player.getUUID(), player);
+        Optional.ofNullable(this.playersByCreator.get(player.getCreator().getName())).ifPresent(players -> {
+            players.remove(player);
+            if (players.isEmpty()) {
+                this.playersByCreator.remove(player.getCreator().getName(), players);
+            }
+        });
+        return removed;
     }
 
     /**
@@ -75,12 +92,15 @@ public class FakeplayerList {
      * @return 被移除的假人
      */
     public @Nullable Fakeplayer removeByUUID(@NotNull UUID uuid) {
-        var player = getByUUID(uuid);
+        // Cleanup is called from PlayerQuitEvent, where Bukkit may already
+        // report the entity as offline. Do not route through getByUUID(),
+        // whose Paper-only stale-online check would erase the record before
+        // the manager can unregister its name and release its network.
+        var player = this.playersByUUID.get(uuid);
         if (player == null) {
             return null;
         }
-        this.remove(player);
-        return player;
+        return this.remove(player) ? player : null;
     }
 
     /**
@@ -103,21 +123,6 @@ public class FakeplayerList {
      */
     public @NotNull @Unmodifiable List<Fakeplayer> getAll() {
         return List.copyOf(this.playersByUUID.values());
-    }
-
-    /**
-     * 检测假人是否在线, 如果不在线了则移除并返回 {@code null}
-     *
-     * @param player 假人
-     * @return 假人
-     */
-    private @Nullable Fakeplayer checkOnline(@NotNull Fakeplayer player) {
-        if (!player.isOnline()) {
-            this.remove(player);
-            return null;
-        }
-
-        return player;
     }
 
     public @NotNull Stream<Fakeplayer> stream() {

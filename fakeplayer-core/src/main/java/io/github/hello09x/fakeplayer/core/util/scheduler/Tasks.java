@@ -83,10 +83,12 @@ public final class Tasks {
             try {
                 initFoliaHandles();
             } catch (Throwable t) {
-                // Detected Folia but the API surface has changed; fall back to Paper scheduling.
-                System.err.println("[fakeplayer-folia] Failed to bind Folia scheduler handles; "
-                        + "falling back to Paper scheduling. Reason: " + t);
-                folia = false;
+                // A BukkitScheduler call is not a valid fallback on Folia. Failing here keeps
+                // the plugin from reporting Folia support while later crashing in an unrelated
+                // entity operation with a much less useful exception.
+                throw new ExceptionInInitializerError(
+                        "[fakeplayer-folia] Failed to bind the Folia scheduler API: " + t
+                );
             }
         }
         FOLIA = folia;
@@ -122,7 +124,10 @@ public final class Tasks {
         var future = new CompletableFuture<T>();
         if (FOLIA) {
             var es = invoke(entity_getScheduler, entity);
-            invoke(entity_run, es, plugin, wrapping(supplier, future), EMPTY_RUNNABLE);
+            invoke(entity_run, es, plugin, wrapping(supplier, future),
+                    (Runnable) () -> future.completeExceptionally(
+                            new IllegalStateException("Entity scheduler retired before task execution")
+                    ));
         } else {
             Bukkit.getScheduler().runTask(plugin, wrap(supplier, future));
         }
@@ -185,21 +190,23 @@ public final class Tasks {
         }
     }
 
-    public static void runDelayed(@NotNull Plugin plugin, @NotNull Entity entity, @NotNull Runnable runnable, long delayTicks) {
+    public static Task runDelayed(@NotNull Plugin plugin, @NotNull Entity entity, @NotNull Runnable runnable, long delayTicks) {
         if (FOLIA) {
             var es = invoke(entity_getScheduler, entity);
-            invoke(entity_runDelayed, es, plugin, (Consumer<Object>) t -> runnable.run(), EMPTY_RUNNABLE, delayTicks);
+            var scheduled = invoke(entity_runDelayed, es, plugin, (Consumer<Object>) t -> runnable.run(), EMPTY_RUNNABLE, delayTicks);
+            return new FoliaTask(scheduled);
         } else {
-            Bukkit.getScheduler().runTaskLater(plugin, runnable, delayTicks);
+            return new PaperTask(Bukkit.getScheduler().runTaskLater(plugin, runnable, delayTicks));
         }
     }
 
-    public static void runGlobalDelayed(@NotNull Plugin plugin, @NotNull Runnable runnable, long delayTicks) {
+    public static Task runGlobalDelayed(@NotNull Plugin plugin, @NotNull Runnable runnable, long delayTicks) {
         if (FOLIA) {
             var grs = invoke(server_getGlobalRegionScheduler, Bukkit.getServer());
-            invoke(global_runDelayed, grs, plugin, (Consumer<Object>) t -> runnable.run(), delayTicks);
+            var scheduled = invoke(global_runDelayed, grs, plugin, (Consumer<Object>) t -> runnable.run(), delayTicks);
+            return new FoliaTask(scheduled);
         } else {
-            Bukkit.getScheduler().runTaskLater(plugin, runnable, delayTicks);
+            return new PaperTask(Bukkit.getScheduler().runTaskLater(plugin, runnable, delayTicks));
         }
     }
 

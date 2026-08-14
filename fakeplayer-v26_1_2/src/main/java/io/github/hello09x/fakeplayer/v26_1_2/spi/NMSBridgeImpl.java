@@ -9,64 +9,46 @@ import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.InetAddress;
-import java.util.Set;
+import java.util.Locale;
 
-/**
- * Minecraft 26.1.2 (new version format) bridge scaffold.
- *
- * <p>This bridge intentionally depends on no spigot NMS artifacts and references
- * no {@code CraftBukkit} classes, so it loads cleanly on a 26.1.2 server and is
- * selected by the {@link NMSBridge#isSupported()} check. Until the real 26.1.2
- * NMS surface is implemented (see the module {@code pom.xml} for the build steps),
- * the NMS factory methods throw a descriptive error rather than failing with an
- * opaque {@link NoClassDefFoundError}.</p>
- */
+/** Mojang-named, reflection-backed bridge for the 26.x server family. */
 public class NMSBridgeImpl implements NMSBridge {
-
-    private final static Set<String> SUPPORTS = Set.of("26.1.2");
-
-    private static UnsupportedOperationException notYetImplemented() {
-        return new UnsupportedOperationException(
-                "fakeplayer-folia: NMS implementation for Minecraft " + Bukkit.getMinecraftVersion()
-                        + " is not yet available. Build the 26.1.2 remapped NMS artifacts "
-                        + "(java -jar BuildTools.jar --rev 26.1.2 --remapped) and fill in the "
-                        + "impl classes under fakeplayer-v26_1_2, then replace the stub bridge."
-        );
-    }
 
     @Override
     public @NotNull NMSEntity fromEntity(@NotNull Entity entity) {
-        throw notYetImplemented();
+        return new NMSEntityImpl(entity);
     }
 
     @Override
     public @NotNull NMSServer fromServer(@NotNull Server server) {
-        throw notYetImplemented();
+        return new NMSServerImpl(server);
     }
 
     @Override
     public @NotNull NMSServerLevel fromWorld(@NotNull World world) {
-        throw notYetImplemented();
+        return new NMSServerLevelImpl(world);
     }
 
     @Override
     public @NotNull NMSServerPlayer fromPlayer(@NotNull Player player) {
-        throw notYetImplemented();
+        return new NMSServerPlayerImpl(player);
     }
 
     @Override
     public @NotNull NMSNetwork createNetwork(@NotNull InetAddress address) {
-        throw notYetImplemented();
+        return new NMSNetworkImpl(address);
     }
 
     @Override
     public boolean isSupported() {
-        return SUPPORTS.contains(Bukkit.getMinecraftVersion());
+        // 26.x uses the same unversioned Mojang class names across patch
+        // releases, so keep this provider available for newer 26.x releases.
+        return Bukkit.getMinecraftVersion().toLowerCase(Locale.ROOT).startsWith("26.");
     }
 
     @Override
     public @NotNull ActionTicker createAction(@NotNull Player player, @NotNull ActionType action, @NotNull ActionSetting setting) {
-        throw notYetImplemented();
+        return new ActionTickerImpl(this, player, action, setting);
     }
 
 }

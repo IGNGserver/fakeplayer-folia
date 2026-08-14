@@ -17,25 +17,30 @@ public class ExpmeCommand extends AbstractCommand {
 
     public void expme(@NotNull Player sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = getFakeplayer(sender, args);
-        var exp = ExperienceUtils.getExp(fake);
+        callOnFake(fake, () -> {
+            var exp = ExperienceUtils.getExp(fake);
+            if (exp != 0) {
+                ExperienceUtils.clean(fake);
+            }
+            return exp;
+        }).thenCompose(exp -> {
+            if (exp == 0) {
+                sendTo(sender, translatable(
+                        "fakeplayer.command.expme.error.non-experience",
+                        text(fake.getName(), WHITE)
+                ).color(GRAY));
+                return java.util.concurrent.CompletableFuture.<Void>completedFuture(null);
+            }
 
-        if (exp == 0) {
-            sender.sendMessage(
-                    translatable(
-                            "fakeplayer.command.expme.error.non-experience",
-                            text(fake.getName(), WHITE)
-                    ).color(GRAY)
-            );
-            return;
-        }
-
-        ExperienceUtils.clean(fake);
-        sender.giveExp(exp, false);
-        sender.sendMessage(translatable(
-                "fakeplayer.command.expme.success",
-                text(fake.getName(), WHITE),
-                text(exp, DARK_GREEN)
-        ).color(GRAY));
+            return callOnFake(sender, () -> {
+                sender.giveExp(exp, false);
+                return null;
+            }).thenAccept(ignored -> sendTo(sender, translatable(
+                    "fakeplayer.command.expme.success",
+                    text(fake.getName(), WHITE),
+                    text(exp, DARK_GREEN)
+            ).color(GRAY)));
+        });
     }
 
 

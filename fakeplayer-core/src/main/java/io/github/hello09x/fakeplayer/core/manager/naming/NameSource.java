@@ -32,7 +32,7 @@ public class NameSource {
      *
      * @return 名称序号
      */
-    public int pop() {
+    public synchronized int pop() {
         if (names.isEmpty()) {
             var newCapacity = capacity * 2;
             for (int i = capacity; i < newCapacity; i++) {
@@ -48,7 +48,7 @@ public class NameSource {
      *
      * @param i 名称序号
      */
-    public void push(int i) {
+    public synchronized void push(int i) {
         if (i >= capacity) {
             return;
         }
@@ -61,7 +61,7 @@ public class NameSource {
         this.sort();
     }
 
-    public void sort() {
+    public synchronized void sort() {
         Collections.sort(this.names);
     }
 

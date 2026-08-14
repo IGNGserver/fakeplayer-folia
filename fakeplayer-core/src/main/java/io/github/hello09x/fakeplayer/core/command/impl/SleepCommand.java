@@ -16,18 +16,18 @@ public class SleepCommand extends AbstractCommand {
      */
     public void sleep(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = getFakeplayer(sender, args);
-        var bed = BlockUtils.getNearbyBlock(fake.getLocation(), 4, block -> {
-            if (!(block.getBlockData() instanceof Bed data)) {
-                return false;
+        runOnFake(fake, () -> {
+            var bed = BlockUtils.getNearbyBlock(fake.getLocation(), 4, block -> {
+                if (!(block.getBlockData() instanceof Bed data)) {
+                    return false;
+                }
+
+                return !data.isOccupied() && data.getPart() == Bed.Part.HEAD;
+            });
+            if (bed != null) {
+                fake.sleep(bed.getLocation(), false);
             }
-
-            return !data.isOccupied() && data.getPart() == Bed.Part.HEAD;
         });
-        if (bed == null) {
-            return;
-        }
-
-        fake.sleep(bed.getLocation(), false);
     }
 
     /**
@@ -35,10 +35,10 @@ public class SleepCommand extends AbstractCommand {
      */
     public void wakeup(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var target = getFakeplayer(sender, args);
-        if (!target.isSleeping()) {
-            return;
-        }
-
-        target.wakeup(true);
+        runOnFake(target, () -> {
+            if (target.isSleeping()) {
+                target.wakeup(true);
+            }
+        });
     }
 }

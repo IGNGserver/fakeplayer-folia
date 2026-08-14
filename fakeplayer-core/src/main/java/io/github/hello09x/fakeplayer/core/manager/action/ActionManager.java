@@ -32,6 +32,9 @@ public class ActionManager {
 
     private final Map<UUID, Map<ActionType, ActionTicker>> managers = new ConcurrentHashMap<>();
 
+    /** Player handles are published when the action is installed on its region. */
+    private final Map<UUID, Player> players = new ConcurrentHashMap<>();
+
     private final NMSBridge bridge;
 
 
@@ -70,7 +73,20 @@ public class ActionManager {
             @NotNull ActionType action,
             @NotNull ActionSetting setting
     ) {
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), player, () -> setActionOnEntity(player, action, setting));
+            return;
+        }
+        setActionOnEntity(player, action, setting);
+    }
+
+    private void setActionOnEntity(
+            @NotNull Player player,
+            @NotNull ActionType action,
+            @NotNull ActionSetting setting
+    ) {
         var manager = this.managers.computeIfAbsent(player.getUniqueId(), key -> new ConcurrentHashMap<>());
+        this.players.put(player.getUniqueId(), player);
         manager.put(action, bridge.createAction(player, action, setting));
         this.timers.computeIfAbsent(player.getUniqueId(), key -> Tasks.runAtFixedRate(
                 Main.getInstance(), player, () -> this.tickPlayer(player.getUniqueId()), 0, 1)
@@ -78,6 +94,23 @@ public class ActionManager {
     }
 
     public void stop(@NotNull Player player) {
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), player, () -> stopOnEntity(player));
+            return;
+        }
+        stopOnEntity(player);
+    }
+
+    /** Remove all action state and ticker handles for a retired fake player. */
+    public void cleanup(@NotNull Player player) {
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), player, () -> cleanupOnEntity(player.getUniqueId()));
+            return;
+        }
+        cleanupOnEntity(player.getUniqueId());
+    }
+
+    private void stopOnEntity(@NotNull Player player) {
         var manager = this.managers.get(player.getUniqueId());
         if (manager == null || manager.isEmpty()) {
             return;
@@ -87,6 +120,15 @@ public class ActionManager {
             if (!entry.getValue().getSetting().equals(ActionSetting.stop())) {
                 entry.setValue(bridge.createAction(player, entry.getKey(), ActionSetting.stop()));
             }
+        }
+    }
+
+    private void cleanupOnEntity(@NotNull UUID uuid) {
+        var manager = this.managers.get(uuid);
+        if (manager != null) {
+            this.hardCleanup(uuid, manager);
+        } else {
+            this.removeState(uuid);
         }
     }
 
@@ -100,7 +142,10 @@ public class ActionManager {
             return;
         }
 
-        var player = Bukkit.getPlayer(uuid);
+        // This method is invoked by the entity scheduler. Looking the player up
+        // through Bukkit here would read global server state from a region
+        // thread; use the handle captured when the action was installed.
+        var player = this.players.get(uuid);
         if (player == null || !player.isValid()) {
             // 假人下线或者死亡
             this.hardCleanup(uuid, manager);
@@ -129,12 +174,23 @@ public class ActionManager {
     private void reap() {
         for (var uuid : this.managers.keySet()) {
             var player = Bukkit.getPlayer(uuid);
-            if (player == null || !player.isValid()) {
-                var manager = this.managers.get(uuid);
-                if (manager != null) {
+            var manager = this.managers.get(uuid);
+            if (manager == null) {
+                continue;
+            }
+            if (player == null) {
+                this.removeState(uuid);
+                continue;
+            }
+
+            // A global-region callback must not invoke NMS action methods
+            // directly. Let the entity scheduler perform the final check and
+            // stop on the owning region.
+            Tasks.run(Main.getInstance(), player, () -> {
+                if (!player.isValid()) {
                     this.hardCleanup(uuid, manager);
                 }
-            }
+            });
         }
     }
 
@@ -149,6 +205,7 @@ public class ActionManager {
             if (timer != null) {
                 timer.cancel();
             }
+            this.players.remove(uuid);
         }
     }
 
@@ -164,6 +221,16 @@ public class ActionManager {
             }
         }
         this.managers.remove(uuid);
+        this.players.remove(uuid);
+        var timer = this.timers.remove(uuid);
+        if (timer != null) {
+            timer.cancel();
+        }
+    }
+
+    private void removeState(@NotNull UUID uuid) {
+        this.managers.remove(uuid);
+        this.players.remove(uuid);
         var timer = this.timers.remove(uuid);
         if (timer != null) {
             timer.cancel();

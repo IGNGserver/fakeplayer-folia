@@ -28,7 +28,6 @@ import org.bukkit.metadata.FixedMetadataValue;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.Optional;
 
 /**
  * @author tanyaofei
@@ -167,12 +166,7 @@ public class FakeplayerReplenishManager implements Listener {
             }
 
             if (!this.replenishFromInventory(target, slot, requires)) {
-                if (Optional.ofNullable(manager.getCreator(target))
-                            .filter(creator -> creator.hasPermission(Permission.replenishFromChest))
-                            .isPresent()
-                ) {
-                    this.replenishFromNearbyChest(target, slot, requires);
-                }
+                this.replenishFromChestIfAllowed(target, slot, requires);
             }
 
         }, 1);  // delay 1 是因为要等手上的物品在此 tick 消耗完
@@ -197,6 +191,36 @@ public class FakeplayerReplenishManager implements Listener {
             }
         }
         return false;
+    }
+
+    private void replenishFromChestIfAllowed(
+            @NotNull Player target,
+            @NotNull EquipmentSlot slot,
+            @NotNull ItemStack item
+    ) {
+        var creator = manager.getCreator(target);
+        if (creator == null) {
+            return;
+        }
+
+        if (Tasks.isFolia() && creator instanceof Player creatorPlayer) {
+            // Permission checks on a real Player must run on that player's
+            // region; the continuation returns to the fake player's region
+            // before touching its inventory or nearby blocks.
+            Tasks.call(Main.getInstance(), creatorPlayer,
+                    () -> creator.hasPermission(Permission.replenishFromChest))
+                    .thenAccept(allowed -> {
+                        if (allowed) {
+                            Tasks.run(Main.getInstance(), target,
+                                    () -> replenishFromNearbyChest(target, slot, item));
+                        }
+                    });
+            return;
+        }
+
+        if (creator.hasPermission(Permission.replenishFromChest)) {
+            this.replenishFromNearbyChest(target, slot, item);
+        }
     }
 
     /**

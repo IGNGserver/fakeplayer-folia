@@ -54,22 +54,24 @@ public class StatusCommand extends AbstractCommand {
      */
     public void status(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = super.getFakeplayer(sender, args);
-        var title = translatable(
-                "fakeplayer.command.status.title",
-                text(fake.getName(), WHITE)
-        ).color(GRAY);
+        var canViewExperience = sender.hasPermission(Permission.expme);
+        callOnFake(fake, () -> {
+            var title = translatable(
+                    "fakeplayer.command.status.title",
+                    text(fake.getName(), WHITE)
+            ).color(GRAY);
 
-        var lines = new ArrayList<Component>(6);
-        lines.add(title);
-        lines.add(this.getHealthLine(fake));
-        lines.add(this.getFoodLine(fake));
-        if (sender.hasPermission(Permission.expme)) {
-            lines.add(this.getExperienceLine(fake));
-        }
-        lines.add(LINE_SPLITTER);
-        lines.add(getFeatureLine(fake));
-
-        sender.sendMessage(join(newlines(), lines));
+            var lines = new ArrayList<Component>(6);
+            lines.add(title);
+            lines.add(this.getHealthLine(fake));
+            lines.add(this.getFoodLine(fake));
+            if (canViewExperience) {
+                lines.add(this.getExperienceLine(fake));
+            }
+            lines.add(LINE_SPLITTER);
+            lines.add(getFeatureLine(fake));
+            return join(newlines(), lines);
+        }).thenAccept(message -> sendTo(sender, message));
     }
 
     private @NotNull Component getFoodLine(@NotNull Player target) {

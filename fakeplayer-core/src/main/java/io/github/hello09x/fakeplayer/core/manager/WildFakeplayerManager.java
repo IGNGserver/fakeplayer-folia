@@ -13,6 +13,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -38,7 +39,7 @@ public class WildFakeplayerManager implements PluginMessageListener {
 
     private final FakeplayerManager manager;
     private final FakeplayerConfig config;
-    private final Map<String, AtomicInteger> offline = new HashMap<>();
+    private final Map<String, AtomicInteger> offline = new ConcurrentHashMap<>();
     private Tasks.Task cleanupTask;
 
     @Inject
@@ -70,8 +71,18 @@ public class WildFakeplayerManager implements PluginMessageListener {
 
         var players = new HashSet<String>();
         players.addAll(Arrays.asList(in.readUTF().split(", ")));
-        players.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
-        this.cleanup0(players);
+        if (Tasks.isFolia()) {
+            // Plugin-message callbacks run on the sender's region. The online
+            // player set is global state, so collect it and perform cleanup on
+            // the global region instead of reading it here.
+            Tasks.runGlobal(Main.getInstance(), () -> {
+                players.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+                this.cleanup0(players);
+            });
+        } else {
+            players.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+            this.cleanup0(players);
+        }
     }
 
     /**
@@ -147,11 +158,12 @@ public class WildFakeplayerManager implements PluginMessageListener {
         var out = ByteStreams.newDataOutput();
         out.writeUTF(SUB_CHANNEL);
         out.writeUTF("ALL");
-        recipient.sendPluginMessage(
+        byte[] message = out.toByteArray();
+        Tasks.run(Main.getInstance(), recipient, () -> recipient.sendPluginMessage(
                 Main.getInstance(),
                 CHANNEL,
-                out.toByteArray()
-        );
+                message
+        ));
     }
 
 }

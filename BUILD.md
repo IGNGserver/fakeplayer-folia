@@ -2,7 +2,7 @@
 
 This is the **fakeplayer-folia** fork. It is functionally identical to upstream
 [`tanyaofei/minecraft-fakeplayer`](https://github.com/tanyaofei/minecraft-fakeplayer)
-plus Folia support and additional Minecraft versions (1.21.11, the 26.x line).
+plus Folia support and additional Minecraft versions (1.21.11 and 26.1.2+).
 
 It is a Maven multi-module project and depends on remapped Spigot NMS artifacts
 that Mojang does not allow to be redistributed. You must produce them yourself
@@ -14,7 +14,7 @@ with BuildTools.
 - Apache Maven 3.8+
 - [BuildTools](https://www.spigotmc.org/wiki/buildtools/)
 
-## 1. Install remapped NMS artifacts
+## 1. Install remapped NMS artifacts for legacy modules
 
 Run BuildTools for every Minecraft version you intend to build for:
 
@@ -31,36 +31,42 @@ java -jar BuildTools.jar --rev 1.21.9 --remapped
 java -jar BuildTools.jar --rev 1.21.10 --remapped
 ```
 
-For the new modules in this fork:
+The 1.21.11 and 26.x modules in this fork do not use the old versioned
+CraftBukkit/Spigot remapping pipeline. They compile against the public Paper API
+and resolve the Mojang-named runtime classes through the reflection adapter in
+`fakeplayer-v26_1_2`; no BuildTools NMS artifact is required for those two
+modules. The 1.21.11 module delegates to that adapter because Folia 1.21.11 also
+uses unversioned CraftBukkit packages.
+
+For the legacy modules, continue to install the matching artifacts as needed:
 
 ```
-# 1.21.11 - reuses the 1.21.10 R6 remapped NMS surface by default.
-# If Spigot ships a standalone 1.21.11 remapped artifact, install it too and
-# switch <nms.version> in fakeplayer-v1_21_11/pom.xml accordingly.
-java -jar BuildTools.jar --rev 1.21.10 --remapped   # shared by v1_21_9 / v1_21_10 / v1_21_11
-
-# 26.1.2 (new version format). Required before the stub bridge is implemented.
-java -jar BuildTools.jar --rev 26.1.2 --remapped
+# 1.21.10 is still needed by the legacy v1_21_10 module.
+java -jar BuildTools.jar --rev 1.21.10 --remapped
 ```
 
 This installs `org.spigotmc:spigot:<rev>-R0.1-SNAPSHOT:remapped-mojang`,
 `org.spigotmc:minecraft-server:<rev>-R0.1-SNAPSHOT:txt:maps-mojang` and the
 `maps-spigot` csrg into your local `~/.m2` repository.
 
-The module `fakeplayer-v26_1_2` has no NMS dependency yet, so it compiles even if
-the 26.1.2 NMS artifacts are absent. Its bridge reports a clear, actionable error
-until the impl is filled in (see `fakeplayer-v26_1_2/pom.xml`).
+The module `fakeplayer-v26_1_2` compiles without NMS artifacts and supports the
+26.x runtime family, including 26.1.2. The adapter is intentionally isolated so
+future 26.x patch changes can be handled without reintroducing versioned NMS
+dependencies.
 
 ## 2. Provide manual dependencies
 
-Two optional integrations are referenced through system-scope jars. Drop them
-into a `lib/` folder at the repository root (this folder is git-ignored):
+Two optional integrations are referenced by the existing upstream source through
+system-scope jars. For a full Maven build, drop them into a `lib/` folder at the
+repository root (this folder is git-ignored):
 
 - `OpenInv.jar` (for the `OpenInv` invsee implementation)
 - `PlaceholderAPI-2.11.6.jar` (for PlaceholderAPI placeholders)
 
-If they are missing the build still works (these integrations are optional and
-activated only at runtime when the corresponding plugins are present).
+The integrations remain runtime-optional: the finished plugin only activates
+them when the corresponding server plugin is present, but Maven still needs the
+compile-time API jars because the upstream integration classes are part of the
+core module.
 
 ## 3. Build
 
@@ -87,5 +93,5 @@ Legend:
 |----------------------------|--------|
 | Paper / Purpur 1.20.1-1.21.11 | supported, behaves as upstream |
 | Folia (1.21.x)             | supported via the scheduler adapter |
-| Paper / Purpur 26.1.2      | loads; NMS impl is a documented TODO stub |
-| Folia 26.1.2               | loads; NMS impl is a documented TODO stub |
+| Paper / Purpur 26.1.2      | supported through the reflection-backed NMS adapter |
+| Folia 26.1.2               | supported through the reflection-backed NMS adapter |

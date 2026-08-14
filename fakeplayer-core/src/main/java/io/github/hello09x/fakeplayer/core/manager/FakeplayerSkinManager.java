@@ -59,6 +59,97 @@ public class FakeplayerSkinManager {
         return true;
     }
 
+    /**
+     * Folia-safe persistence path for the skin command. UUID reads from live
+     * players are captured on their owning entity schedulers before the JDBC
+     * write is moved to an asynchronous executor.
+     */
+    public @NotNull CompletableFuture<Boolean> rememberSkinAsync(
+            @NotNull CommandSender creator,
+            @NotNull Player to,
+            @NotNull OfflinePlayer from
+    ) {
+        var sourceId = from instanceof Player source && Tasks.isFolia()
+                ? Tasks.call(Main.getInstance(), source, source::getUniqueId)
+                : CompletableFuture.completedFuture(from.getUniqueId());
+        var targetId = Tasks.isFolia()
+                ? Tasks.call(Main.getInstance(), to, to::getUniqueId)
+                : CompletableFuture.completedFuture(to.getUniqueId());
+        var creatorId = creator instanceof Player player && Tasks.isFolia()
+                ? Tasks.call(Main.getInstance(), player, player::getUniqueId)
+                : CompletableFuture.completedFuture(creator instanceof Player player ? player.getUniqueId() : null);
+
+        return sourceId.thenCombine(targetId, SkinIds::newTarget)
+                .thenCombine(creatorId, (ids, creatorUuid) -> {
+                    if (creatorUuid == null) {
+                        return null;
+                    }
+                    return new FakePlayerSkin(ids.targetId(), creatorUuid, ids.sourceId());
+                })
+                .thenCompose(skin -> {
+                    if (skin == null) {
+                        return CompletableFuture.completedFuture(false);
+                    }
+                    return CompletableFuture.supplyAsync(() -> {
+                        repository.insertOrUpdate(skin);
+                        return true;
+                    });
+                });
+    }
+
+    /**
+     * Folia-safe variant used during spawning. Repository access is blocking
+     * JDBC work and must not run on the fake player's region thread.
+     */
+    public @NotNull CompletableFuture<Void> useDefaultSkinAsync(
+            @NotNull CommandSender creator,
+            @NotNull Player to
+    ) {
+        var targetName = to.getName();
+        var targetId = to.getUniqueId();
+        if (!(creator instanceof Player p)) {
+            if (!config.isDefaultOnlineSkin()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            return this.getOfflinePlayerAsync(targetName)
+                    .thenCompose(source -> this.useOnlineSkinAsync(to, source))
+                    .thenApply(ignored -> null);
+        }
+
+        var creatorId = Tasks.isFolia()
+                ? Tasks.call(Main.getInstance(), p, p::getUniqueId)
+                : CompletableFuture.completedFuture(p.getUniqueId());
+        return creatorId.thenCompose(id -> CompletableFuture
+                .supplyAsync(() -> repository.selectByCreatorIdAndPlayerId(id, targetId))
+                .thenCompose(skin -> {
+                    if (skin != null) {
+                        return this.getOfflinePlayerAsync(skin.targetId())
+                                .thenCompose(source -> this.useOnlineSkinAsync(to, source))
+                                .thenApply(ignored -> null);
+                    }
+                    if (config.isDefaultOnlineSkin()) {
+                        return this.getOfflinePlayerAsync(targetName)
+                                .thenCompose(source -> this.useOnlineSkinAsync(to, source))
+                                .thenApply(ignored -> null);
+                    }
+                    return this.useOnlineSkinAsync(to, p).thenApply(ignored -> null);
+                }));
+    }
+
+    private @NotNull CompletableFuture<OfflinePlayer> getOfflinePlayerAsync(@NotNull UUID uuid) {
+        if (Tasks.isFolia()) {
+            return Tasks.callGlobal(Main.getInstance(), () -> Bukkit.getOfflinePlayer(uuid));
+        }
+        return CompletableFuture.completedFuture(Bukkit.getOfflinePlayer(uuid));
+    }
+
+    private @NotNull CompletableFuture<OfflinePlayer> getOfflinePlayerAsync(@NotNull String name) {
+        if (Tasks.isFolia()) {
+            return Tasks.callGlobal(Main.getInstance(), () -> Bukkit.getOfflinePlayer(name));
+        }
+        return CompletableFuture.completedFuture(Bukkit.getOfflinePlayer(name));
+    }
+
     public void useDefaultSkin(@NotNull CommandSender creator, @NotNull Player to) {
         if (!(creator instanceof Player p)) {
             // 非玩家创建的假人只能采用在线皮肤
@@ -81,7 +172,11 @@ public class FakeplayerSkinManager {
             this.useOnlineSkinAsync(to, Bukkit.getOfflinePlayer(to.getName()));
         } else {
             // 使用召唤者皮肤
-            this.useSkin(to, p);
+            if (Tasks.isFolia()) {
+                this.useOnlineSkinAsync(to, p);
+            } else {
+                this.useSkin(to, p);
+            }
         }
     }
 
@@ -101,49 +196,73 @@ public class FakeplayerSkinManager {
 
     @CanIgnoreReturnValue
     public @NotNull CompletableFuture<Boolean> useOnlineSkinAsync(@NotNull Player to, @NotNull OfflinePlayer from) {
-        if (this.useSkin(to, from)) {
-            return CompletableFuture.completedFuture(true);
-        }
+        return this.readProfileAsync(from).thenComposeAsync(source -> {
+            var profile = source.profile();
+            var profileId = source.uuid();
+            if (!profile.hasTextures()) {
+                profile = profileCache.getIfPresent(profileId);
+            }
 
-        var profile = from.getPlayerProfile();
-        return CompletableFuture
-                .supplyAsync(() -> {
-                    try {
-                        return profile.complete() ? ProfileCompleteResult.SUCCESS : ProfileCompleteResult.FAILED;
-                    } catch (Exception e) {
-                        log.warning("Failed to update skin of fake player %s since could not fetch online profile from mojang\n%s".formatted(
-                                Optional.ofNullable(from.getName())
-                                        .orElse(from.getUniqueId().toString()),
-                                Throwables.getStackTraceAsString(e)
-                        ));
-                        return ProfileCompleteResult.ERROR;
-                    }
-                })
-                .thenComposeAsync(result -> {
-                    if (result == ProfileCompleteResult.SUCCESS && profile.hasTextures()) {
-                        profileCache.put(from.getUniqueId(), profile);
-                    }
+            if (profile != null && profile.hasTextures()) {
+                var readyProfile = profile;
+                return Tasks.call(Main.getInstance(), to, () -> {
+                    this.setTexture(to, readyProfile);
+                    return true;
+                });
+            }
 
-                    return Tasks.call(Main.getInstance(), to, () -> switch (result) {
-                        case SUCCESS -> {
-                            try {
-                                this.setTexture(to, profile);
-                                yield true;
-                            } catch (Exception e) {
+            var profileToComplete = profile;
+            return CompletableFuture
+                    .supplyAsync(() -> {
+                        try {
+                            return profileToComplete.complete() ? ProfileCompleteResult.SUCCESS : ProfileCompleteResult.FAILED;
+                        } catch (Exception e) {
+                            log.warning("Failed to update skin of fake player %s since could not fetch online profile from mojang\n%s".formatted(
+                                    Optional.ofNullable(source.name()).orElse(profileId.toString()),
+                                    Throwables.getStackTraceAsString(e)
+                            ));
+                            return ProfileCompleteResult.ERROR;
+                        }
+                    })
+                    .thenComposeAsync(result -> {
+                        if (result == ProfileCompleteResult.SUCCESS && profileToComplete.hasTextures()) {
+                            profileCache.put(profileId, profileToComplete);
+                        }
+
+                        return Tasks.call(Main.getInstance(), to, () -> switch (result) {
+                            case SUCCESS -> {
+                                try {
+                                    this.setTexture(to, profileToComplete);
+                                    yield true;
+                                } catch (Exception e) {
+                                    yield false;
+                                }
+                            }
+                            case FAILED -> {
+                                log.warning("Failed to update online skin of fakeplayer %s, maybe not a real player".formatted(
+                                        Optional.ofNullable(source.name()).orElse(profileId.toString()))
+                                );
                                 yield false;
                             }
-                        }
-                        case FAILED -> {
-                            log.warning("Failed to update online skin of fakeplayer %s, maybe not a real player".formatted(
-                                    Optional.ofNullable(from.getName())
-                                            .orElse(from.getUniqueId().toString()))
-                            );
-                            yield false;
-                        }
-                        case ERROR -> false;
-
+                            case ERROR -> false;
+                        });
                     });
-                });
+        });
+    }
+
+    private @NotNull CompletableFuture<ProfileSource> readProfileAsync(@NotNull OfflinePlayer from) {
+        if (Tasks.isFolia() && from instanceof Player source) {
+            return Tasks.call(Main.getInstance(), source, () -> new ProfileSource(
+                    source.getUniqueId(),
+                    source.getName(),
+                    source.getPlayerProfile()
+            ));
+        }
+        return CompletableFuture.completedFuture(new ProfileSource(
+                from.getUniqueId(),
+                from.getName(),
+                from.getPlayerProfile()
+        ));
     }
 
     private void setTexture(@NotNull Player to, @NotNull PlayerProfile fromProfile) {
@@ -157,6 +276,15 @@ public class FakeplayerSkinManager {
         SUCCESS,
         FAILED,
         ERROR
+    }
+
+    private record ProfileSource(UUID uuid, String name, PlayerProfile profile) {
+    }
+
+    private record SkinIds(UUID sourceId, UUID targetId) {
+        private static SkinIds newTarget(UUID sourceId, UUID targetId) {
+            return new SkinIds(sourceId, targetId);
+        }
     }
 
 

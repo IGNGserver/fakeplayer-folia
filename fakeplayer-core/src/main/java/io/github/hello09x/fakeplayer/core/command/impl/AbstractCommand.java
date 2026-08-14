@@ -10,6 +10,8 @@ import io.github.hello09x.fakeplayer.api.spi.NMSBridge;
 import io.github.hello09x.fakeplayer.core.Main;
 import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerManager;
+import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
+import net.kyori.adventure.text.Component;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
@@ -17,7 +19,9 @@ import org.jetbrains.annotations.Nullable;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 import static net.kyori.adventure.text.Component.translatable;
@@ -90,6 +94,35 @@ public abstract class AbstractCommand {
 
     protected @Nullable Player getTargetNullable(@NotNull CommandSender sender, @NotNull CommandArguments args) {
         return (Player) args.get("name");
+    }
+
+    /**
+     * Execute a fake-player mutation on the entity's owning region under Folia.
+     */
+    protected void runOnFake(@NotNull Player fake, @NotNull Runnable action) {
+        if (Tasks.isFolia()) {
+            Tasks.run(Main.getInstance(), fake, action);
+        } else {
+            action.run();
+        }
+    }
+
+    protected <T> @NotNull CompletableFuture<T> callOnFake(
+            @NotNull Player fake,
+            @NotNull Supplier<T> supplier
+    ) {
+        if (Tasks.isFolia()) {
+            return Tasks.call(Main.getInstance(), fake, supplier);
+        }
+        return CompletableFuture.completedFuture(supplier.get());
+    }
+
+    protected void sendTo(@NotNull CommandSender sender, @NotNull Component message) {
+        if (Tasks.isFolia() && sender instanceof Player player) {
+            Tasks.run(Main.getInstance(), player, () -> sender.sendMessage(message));
+        } else {
+            sender.sendMessage(message);
+        }
     }
 
     protected @NotNull List<Player> getFakeplayers(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {

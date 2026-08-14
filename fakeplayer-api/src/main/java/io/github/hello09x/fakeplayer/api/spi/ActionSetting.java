@@ -18,17 +18,17 @@ class ActionSetting implements Cloneable {
     /**
      * 剩余次数
      */
-    public int remains;
+    public volatile int remains;
 
     /**
      * 间隔
      */
-    public int interval;
+    public volatile int interval;
 
     /**
      * 等待 ticks
      */
-    public int wait;
+    public volatile int wait;
 
     public ActionSetting(int maximum, int interval) {
         this(maximum, interval, 0);

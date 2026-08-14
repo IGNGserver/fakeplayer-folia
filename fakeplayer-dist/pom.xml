@@ -242,6 +242,16 @@
                                         <include name="fakeplayer-${revision}.jar"/>
                                     </fileset>
                                 </copy>
+                                <copy failonerror="false" tofile="../server-1.21.11/plugins/fakeplayer.jar">
+                                    <fileset dir="${project.build.directory}">
+                                        <include name="fakeplayer-${revision}.jar"/>
+                                    </fileset>
+                                </copy>
+                                <copy failonerror="false" tofile="../server-26.1.2/plugins/fakeplayer.jar">
+                                    <fileset dir="${project.build.directory}">
+                                        <include name="fakeplayer-${revision}.jar"/>
+                                    </fileset>
+                                </copy>
                             </target>
                         </configuration>
                         <goals>

@@ -52,7 +52,7 @@ public class ListCommand extends AbstractCommand {
                     return textOfChildren(
                             text(fakeplayer.getName() + " (" + manager.getCreatorName(fakeplayer) + ")", GOLD),
                             text(" - ", GRAY),
-                            text(toLocationString(fakeplayer.getLocation()), WHITE),
+                            text(toLocationString(manager.getLocationSnapshot(fakeplayer)), WHITE),
                             partTp,
                             partKill
                     );
