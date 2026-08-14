@@ -38,6 +38,7 @@ final class NMSNetworkImpl implements NMSNetwork {
     private final Queue<Object> outbound = new ConcurrentLinkedQueue<>();
 
     private volatile Object connection;
+    private volatile Object serverHandle;
     private volatile Object playerHandle;
     private volatile Player player;
     private volatile NMSServerGamePacketListener listener;
@@ -67,7 +68,8 @@ final class NMSNetworkImpl implements NMSNetwork {
 
         this.player = player;
         try {
-            Object serverHandle = NmsAccess.handle(server);
+            Object serverHandle = NmsAccess.serverHandle(server);
+            this.serverHandle = serverHandle;
             Object playerHandle = NmsAccess.handle(player);
             this.playerHandle = playerHandle;
             prepareSpawnWorld(playerHandle, spawnAt);
@@ -121,7 +123,17 @@ final class NMSNetworkImpl implements NMSNetwork {
     private static void prepareSpawnWorld(Object playerHandle, Location spawnAt) {
         Object worldHandle = NmsAccess.handle(spawnAt.getWorld());
         NmsAccess.invokeOptional(playerHandle, "setServerLevel", worldHandle);
-        NmsAccess.invoke(playerHandle, "snapTo", spawnAt.getX(), spawnAt.getY(), spawnAt.getZ());
+        // ServerPlayer.snapTo() sends a position update through connection and
+        // therefore throws on 1.21.11 before PlayerList.placeNewPlayer has
+        // installed ServerGamePacketListenerImpl. Set the raw entity position
+        // during pre-login; the login path will publish it to the client.
+        try {
+            NmsAccess.invoke(playerHandle, "setPos", spawnAt.getX(), spawnAt.getY(), spawnAt.getZ());
+        } catch (RuntimeException ignored) {
+            // Keep compatibility with transitional Mojang mappings that do not
+            // expose the raw three-coordinate setter.
+            NmsAccess.invoke(playerHandle, "snapTo", spawnAt.getX(), spawnAt.getY(), spawnAt.getZ());
+        }
         NmsAccess.invokeOptional(playerHandle, "setYRot", spawnAt.getYaw());
         NmsAccess.invokeOptional(playerHandle, "setXRot", spawnAt.getPitch());
     }
@@ -145,14 +157,93 @@ final class NMSNetworkImpl implements NMSNetwork {
 
         var currentConnection = this.connection;
         this.connection = null;
-        if (currentConnection != null) {
+        var currentServerHandle = this.serverHandle;
+        this.serverHandle = null;
+        var currentPlayerHandle = this.playerHandle;
+        // On Folia this method is normally reached from PlayerQuitEvent while
+        // the native disconnect routine is still removing the entity. Calling
+        // Connection#disconnect or handleDisconnection again would re-enter
+        // PlayerList.remove and retire the entity scheduler twice. The native
+        // path owns the connection teardown there; this method only releases
+        // fakeplayer-side state. Paper 26 needs the explicit fallback because
+        // its synthetic EmbeddedChannel may not invoke the native callback.
+        if (currentConnection != null && !Tasks.isFolia()) {
+            try {
+                // Player#kick delegates to the packet listener. On Paper 26
+                // the EmbeddedChannel's outbound completion listener can be
+                // bypassed by the in-memory pipeline, so force the vanilla
+                // Connection disconnect transition as well. This closes the
+                // channel and records DisconnectionDetails before the
+                // idempotent handleDisconnection() call below.
+                var genericReason = NmsAccess.invokeStatic(
+                        "net.minecraft.network.chat.Component",
+                        "translatable",
+                        "multiplayer.disconnect.generic"
+                );
+                NmsAccess.invoke(currentConnection, "disconnect", genericReason);
+            } catch (Throwable ignored) {
+                // Keep the raw channel close as a fallback for transitional
+                // 26.x mappings that do not expose the same overload.
+            }
             var channel = NmsAccess.getFieldOptional(currentConnection, "channel");
             NmsAccess.invokeOptional(channel, "close");
             NmsAccess.invokeOptional(channel, "finishAndReleaseAll");
+            try {
+                // EmbeddedChannel#close does not reliably drive Connection's
+                // channelInactive callback on Paper 26. That leaves the
+                // ServerGamePacketListenerImpl attached to PlayerList even
+                // though Bukkit#kick has already sent its disconnect packet.
+                // Invoke the vanilla idempotent disconnect hook explicitly so
+                // PlayerList removal, PlayerQuitEvent and plugin integrations
+                // follow the same path as a real client disconnect.
+                NmsAccess.invoke(currentConnection, "handleDisconnection");
+            } catch (Throwable throwable) {
+                LOG.warning("Failed to complete fake-player disconnect: " + throwable.getMessage());
+            }
+            forcePlayerListenerDisconnect(currentServerHandle, currentPlayerHandle);
+        }
+        if (currentPlayerHandle != null) {
+            NmsAccess.cleanupAdvancementSink(currentPlayerHandle);
+            try {
+                // Player removal is normally synchronous, but Folia may defer
+                // part of the disconnect callback by one global tick.
+                Tasks.runGlobalDelayed(
+                        Main.getInstance(),
+                        () -> NmsAccess.cleanupAdvancementSink(currentPlayerHandle),
+                        1
+                );
+            } catch (Throwable ignored) {
+                // The immediate cleanup above is sufficient during shutdown.
+            }
         }
         this.listener = null;
         this.playerHandle = null;
         this.player = null;
+    }
+
+    private static void forcePlayerListenerDisconnect(Object serverHandle, Object playerHandle) {
+        if (serverHandle == null || playerHandle == null) {
+            LOG.warning("Cannot finalize fake-player server entry: missing server/player handle");
+            return;
+        }
+
+        try {
+            Object playerList = NmsAccess.invoke(serverHandle, "getPlayerList");
+            Object uuid = NmsAccess.invokeOptional(playerHandle, "getUUID");
+            if (uuid == null || NmsAccess.invokeOptional(playerList, "getPlayer", uuid) == null) {
+                // The normal Connection#handleDisconnection path already removed
+                // the player. Avoid firing PlayerQuitEvent a second time.
+                return;
+            }
+            // Paper 26's Connection can be closed without reaching its
+            // packet listener when the outbound pipeline is synthetic. The
+            // Paper PlayerList.remove overload is the canonical finalization
+            // path here: it fires PlayerQuitEvent, closes open inventories,
+            // saves state, and removes the player from the server registry.
+            NmsAccess.invoke(playerList, "remove", playerHandle);
+        } catch (Throwable throwable) {
+            LOG.warning("Failed to remove fake player from the server player list: " + throwable.getMessage());
+        }
     }
 
     private Object createConnection(Object serverHandle) {
@@ -226,6 +317,13 @@ final class NMSNetworkImpl implements NMSNetwork {
             return args != null && args.length == 1 && proxy == args[0];
         }
         if (name.equals("write") && args != null && args.length >= 3) {
+            if (isDisconnectPacket(args[1])) {
+                // Paper 26 disconnects through a clientbound disconnect packet
+                // whose completion listener closes the channel. Let it pass
+                // through the real pipeline so PlayerQuitEvent and the normal
+                // fake-player cleanup path are still fired.
+                return NmsAccess.invoke(args[0], "write", args[1], args[2]);
+            }
             if (!isMinecraftPacket(args[1])) {
                 // Connection.setupOutboundProtocol sends an internal
                 // configuration task through the same pipeline. It must reach
@@ -259,6 +357,15 @@ final class NMSNetworkImpl implements NMSNetwork {
 
     private static boolean isMinecraftPacket(Object message) {
         return message != null && message.getClass().getName().startsWith("net.minecraft.network.protocol.");
+    }
+
+    private static boolean isDisconnectPacket(Object message) {
+        if (message == null) {
+            return false;
+        }
+        var className = message.getClass().getName();
+        return className.endsWith("ClientboundDisconnectPacket")
+                || className.endsWith("ClientboundLoginDisconnectPacket");
     }
 
     private void drainOutbound() {

@@ -266,14 +266,26 @@ public class FakeplayerManager {
      * synchronous so existing command behaviour is preserved there.
      */
     private void kick(@NotNull Player target, @NotNull Component reason) {
+        var fakeplayer = this.playerList.getByUUID(target.getUniqueId());
         if (Tasks.isFolia()) {
             Tasks.run(Main.getInstance(), target, () -> {
                 if (target.isOnline()) {
                     target.kick(reason);
                 }
+                // PlayerQuitEvent owns cleanup on Folia. Calling close here as
+                // well would re-enter the native PlayerList.remove path while
+                // Folia is retiring the entity scheduler.
             });
         } else {
             target.kick(reason);
+            // Paper 26 can leave an EmbeddedChannel open after Bukkit's
+            // Player#kick has sent the disconnect request. Close the
+            // synthetic network explicitly as a deterministic fallback; on
+            // normal Paper versions PlayerQuitEvent has already made this a
+            // harmless second close.
+            if (fakeplayer != null) {
+                fakeplayer.close();
+            }
         }
     }
 

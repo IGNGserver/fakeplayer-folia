@@ -14,6 +14,7 @@
         <module>fakeplayer-api</module>
         <module>fakeplayer-core</module>
         <module>fakeplayer-dist</module>
+        <module>fakeplayer-modern-dist</module>
         <module>fakeplayer-v1_20_1</module>
         <module>fakeplayer-v1_20_2</module>
         <module>fakeplayer-v1_20_3</module>
@@ -63,6 +64,10 @@
             <id>jitpack.io</id>
             <url>https://jitpack.io</url>
         </repository>
+        <repository>
+            <id>placeholderapi-repo</id>
+            <url>https://repo.extendedclip.com/content/repositories/placeholderapi/</url>
+        </repository>
     </repositories>
 
     <dependencyManagement>
@@ -109,7 +114,7 @@
             <dependency>
                 <groupId>dev.jorel</groupId>
                 <artifactId>commandapi-paper-core</artifactId>
-                <version>11.0.0</version>
+                <version>11.2.0</version>
                 <scope>provided</scope>
             </dependency>
 

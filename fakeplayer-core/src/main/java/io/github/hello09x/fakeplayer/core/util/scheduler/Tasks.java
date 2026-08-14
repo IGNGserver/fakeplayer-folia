@@ -217,7 +217,11 @@ public final class Tasks {
     public static Task runAtFixedRate(@NotNull Plugin plugin, @NotNull Entity entity, @NotNull Runnable runnable, long delayTicks, long periodTicks) {
         if (FOLIA) {
             var es = invoke(entity_getScheduler, entity);
-            var scheduled = invoke(entity_runAtFixedRate, es, plugin, (Consumer<Object>) t -> runnable.run(), EMPTY_RUNNABLE, delayTicks, periodTicks);
+            // Folia rejects an initial delay of zero for repeating tasks. Bukkit's
+            // scheduler accepts it, so normalize only on the Folia path while
+            // keeping the existing Paper behaviour unchanged.
+            var scheduled = invoke(entity_runAtFixedRate, es, plugin, (Consumer<Object>) t -> runnable.run(), EMPTY_RUNNABLE,
+                    normalizeFoliaInitialDelay(delayTicks), periodTicks);
             return new FoliaTask(scheduled);
         }
         return new PaperTask(Bukkit.getScheduler().runTaskTimer(plugin, runnable, delayTicks, periodTicks));
@@ -226,7 +230,8 @@ public final class Tasks {
     public static Task runAtFixedRateGlobal(@NotNull Plugin plugin, @NotNull Runnable runnable, long delayTicks, long periodTicks) {
         if (FOLIA) {
             var grs = invoke(server_getGlobalRegionScheduler, Bukkit.getServer());
-            var scheduled = invoke(global_runAtFixedRate, grs, plugin, (Consumer<Object>) t -> runnable.run(), delayTicks, periodTicks);
+            var scheduled = invoke(global_runAtFixedRate, grs, plugin, (Consumer<Object>) t -> runnable.run(),
+                    normalizeFoliaInitialDelay(delayTicks), periodTicks);
             return new FoliaTask(scheduled);
         }
         return new PaperTask(Bukkit.getScheduler().runTaskTimer(plugin, runnable, delayTicks, periodTicks));
@@ -276,6 +281,10 @@ public final class Tasks {
                 future.completeExceptionally(e);
             }
         };
+    }
+
+    private static long normalizeFoliaInitialDelay(long delayTicks) {
+        return Math.max(1L, delayTicks);
     }
 
     private static Object invoke(@NotNull Method method, Object target, Object... args) {

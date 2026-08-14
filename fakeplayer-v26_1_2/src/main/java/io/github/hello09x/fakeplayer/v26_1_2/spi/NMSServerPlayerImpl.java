@@ -162,15 +162,14 @@ final class NMSServerPlayerImpl implements NMSServerPlayer {
         Object advancements = NmsAccess.invokeOptional(handle, "getAdvancements");
         NmsAccess.invokeOptional(advancements, "stopListening");
         NmsAccess.setFieldIfPresent(advancements, "progressChanged", new NoopSet());
-        // 26.x save() serializes the whole progress map without checking the
-        // dirty set first. Point the private save path at an existing directory
-        // so any defensive save attempt fails without creating a player data
-        // file. The field is version-local and the helper silently falls back
-        // on a future mapping where it is absent.
-        var sink = plugin.getDataFolder().toPath();
-        if (!java.nio.file.Files.isDirectory(sink)) {
-            sink = java.nio.file.Path.of(".");
-        }
+        // Recent Folia calls save() unconditionally while removing a player,
+        // even when progressChanged is empty. Use a per-fake-player transient
+        // sink and remove it after the synthetic connection closes; this avoids
+        // writing advancement state into the real player-data directory and
+        // avoids the noisy access-denied error caused by pointing at a folder.
+        var sink = plugin.getDataFolder().toPath().resolve(
+                ".fakeplayer-advancements-" + player.getUniqueId() + ".json"
+        );
         NmsAccess.setFieldIfPresent(advancements, "playerSavePath", sink);
     }
 

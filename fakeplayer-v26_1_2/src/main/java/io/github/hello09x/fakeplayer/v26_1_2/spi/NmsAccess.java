@@ -34,6 +34,20 @@ final class NmsAccess {
         }
     }
 
+    /**
+     * CraftServer.getHandle() is the player list on recent Folia builds,
+     * whereas the NMS operations used here require the MinecraftServer
+     * instance. Prefer CraftServer.getServer() and retain the old fallback for
+     * server implementations that do not expose that accessor.
+     */
+    static Object serverHandle(@NotNull Object server) {
+        try {
+            return invoke(server, "getServer");
+        } catch (RuntimeException ignored) {
+            return handle(server);
+        }
+    }
+
     static Object invoke(@NotNull Object target, @NotNull String name, Object... args) {
         return invoke(target.getClass(), target, name, args);
     }
@@ -154,6 +168,20 @@ final class NmsAccess {
         }
     }
 
+    static void cleanupAdvancementSink(Object playerHandle) {
+        try {
+            Object advancements = invokeOptional(playerHandle, "getAdvancements");
+            Object path = getFieldOptional(advancements, "playerSavePath");
+            if (path instanceof java.nio.file.Path sink
+                    && sink.getFileName() != null
+                    && sink.getFileName().toString().startsWith(".fakeplayer-advancements-")) {
+                java.nio.file.Files.deleteIfExists(sink);
+            }
+        } catch (Throwable ignored) {
+            // Cleanup must never interfere with disconnecting the fake player.
+        }
+    }
+
     static Class<?> classForName(@NotNull String name) {
         ClassLoader context = Thread.currentThread().getContextClassLoader();
         if (context != null) {
@@ -232,7 +260,16 @@ final class NmsAccess {
         if (constructor != null) {
             return constructor;
         }
-        throw new IllegalStateException("No compatible constructor for " + type.getName() + "(" + args.length + " args)");
+        var actualTypes = java.util.Arrays.stream(args)
+                .map(arg -> arg == null ? "null" : arg.getClass().getName())
+                .collect(java.util.stream.Collectors.joining(", "));
+        var available = java.util.Arrays.stream(type.getDeclaredConstructors())
+                .map(Constructor::toGenericString)
+                .collect(java.util.stream.Collectors.joining("; "));
+        throw new IllegalStateException(
+                "No compatible constructor for " + type.getName() + "(" + args.length + " args); "
+                        + "actual types: [" + actualTypes + "]; available: [" + available + "]"
+        );
     }
 
     private static java.util.stream.Stream<Method> allMethods(Class<?> type) {

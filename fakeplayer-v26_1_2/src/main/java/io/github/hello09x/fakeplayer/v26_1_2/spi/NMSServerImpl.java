@@ -15,7 +15,7 @@ final class NMSServerImpl implements NMSServer {
 
     NMSServerImpl(@NotNull Server server) {
         this.server = server;
-        this.handle = NmsAccess.handle(server);
+        this.handle = NmsAccess.serverHandle(server);
     }
 
     Object handle() {

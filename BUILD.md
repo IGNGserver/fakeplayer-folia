@@ -4,19 +4,39 @@ This is the **fakeplayer-folia** fork. It is functionally identical to upstream
 [`tanyaofei/minecraft-fakeplayer`](https://github.com/tanyaofei/minecraft-fakeplayer)
 plus Folia support and additional Minecraft versions (1.21.11 and 26.1.2+).
 
-It is a Maven multi-module project and depends on remapped Spigot NMS artifacts
-that Mojang does not allow to be redistributed. You must produce them yourself
-with BuildTools.
+It is a Maven multi-module project. The modern distribution for Folia/Paper
+1.21.11 and 26.x builds from the public Paper API and the reflection-backed
+adapter, so it does not require legacy NMS artifacts. The optional legacy
+distribution still depends on remapped Spigot artifacts that Mojang does not
+allow to be redistributed; those must be produced locally with BuildTools.
 
 ## Prerequisites
 
 - JDK 21 (the project targets Java 21; the api module is compiled with Java 17)
 - Apache Maven 3.8+
-- [BuildTools](https://www.spigotmc.org/wiki/buildtools/)
+- [BuildTools](https://www.spigotmc.org/wiki/buildtools/) (only for the legacy
+  distribution)
 
-## 1. Install remapped NMS artifacts for legacy modules
+## 1. Build the modern distribution
 
-Run BuildTools for every Minecraft version you intend to build for:
+This is the recommended build for Folia/Paper 1.21.11 and 26.x. It builds only
+the API, core, 1.21.11, 26.x and modern shaded-distribution modules, so a clean
+checkout does not need a root `lib/` directory or any BuildTools-generated NMS
+artifact:
+
+```
+mvn -B -ntp -Drevision=0.3.19-folia.1 -DskipTests \
+    -pl fakeplayer-modern-dist -am clean package
+```
+
+The final plugin is produced at
+`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.1.jar`. The shaded jar
+contains both modern ServiceLoader providers and keeps OpenInv, PlaceholderAPI
+and CommandAPI as server-side dependencies.
+
+## 2. Install remapped NMS artifacts for the legacy distribution
+
+Run BuildTools for every legacy Minecraft version you intend to package:
 
 ```
 java -jar BuildTools.jar --rev 1.21 --remapped
@@ -38,13 +58,6 @@ and resolve the Mojang-named runtime classes through the reflection adapter in
 modules. The 1.21.11 module delegates to that adapter because Folia 1.21.11 also
 uses unversioned CraftBukkit packages.
 
-For the legacy modules, continue to install the matching artifacts as needed:
-
-```
-# 1.21.10 is still needed by the legacy v1_21_10 module.
-java -jar BuildTools.jar --rev 1.21.10 --remapped
-```
-
 This installs `org.spigotmc:spigot:<rev>-R0.1-SNAPSHOT:remapped-mojang`,
 `org.spigotmc:minecraft-server:<rev>-R0.1-SNAPSHOT:txt:maps-mojang` and the
 `maps-spigot` csrg into your local `~/.m2` repository.
@@ -54,30 +67,32 @@ The module `fakeplayer-v26_1_2` compiles without NMS artifacts and supports the
 future 26.x patch changes can be handled without reintroducing versioned NMS
 dependencies.
 
-## 2. Provide manual dependencies
+## 3. Optional integrations
 
-Two optional integrations are referenced by the existing upstream source through
-system-scope jars. For a full Maven build, drop them into a `lib/` folder at the
-repository root (this folder is git-ignored):
+OpenInv and PlaceholderAPI are compile-time-only optional integrations. Their
+APIs are resolved from Maven repositories, so a clean checkout no longer needs
+manually copied jars in a root `lib/` directory. The finished plugin only
+activates these integrations when the corresponding server plugin is present.
 
-- `OpenInv.jar` (for the `OpenInv` invsee implementation)
-- `PlaceholderAPI-2.11.6.jar` (for PlaceholderAPI placeholders)
+The pinned compile-time API versions are OpenInv 5.3.1 and PlaceholderAPI
+2.12.3. They are not shaded into the distribution jar and must still be
+installed separately on the server when those integrations are desired. For
+PlaceholderAPI, use its official server plugin distribution at runtime; the
+Maven artifact is only used to compile the optional expansion integration.
 
-The integrations remain runtime-optional: the finished plugin only activates
-them when the corresponding server plugin is present, but Maven still needs the
-compile-time API jars because the upstream integration classes are part of the
-core module.
+## 4. Build the full legacy distribution
 
-## 3. Build
+After installing the matching BuildTools artifacts for every legacy module, run:
 
 ```
-mvn -q -DskipTests clean package
+mvn -B -ntp -Drevision=0.3.19-folia.1 -DskipTests clean package
 ```
 
-The shaded jar is produced at `target/fakeplayer-0.3.19-folia.1.jar`. Copy it to
+The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.1.jar` by
+`fakeplayer-dist`. Copy the appropriate modern or full distribution jar to
 your server's `plugins/` folder.
 
-## 4. Runtime platforms
+## 5. Runtime platforms
 
 The plugin runs unchanged on Paper / Purpur, and on Folia (`folia-supported: true`
 is declared in `plugin.yml`). On Folia all scheduler activity is dispatched via a
