@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  modern:
+    name: Build modern distribution and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Verify whitespace
+        run: git diff --check
+      - name: Static security audit
+        run: |
+          if rg -n 'Runtime\.exec|ProcessBuilder|ObjectInputStream|ScriptEngine|URLClassLoader' \
+              fakeplayer-api fakeplayer-core fakeplayer-v1_21_11 fakeplayer-v26_1_2; then
+            echo 'Unexpected process/classloader/deserialization API found'
+            exit 1
+          fi
+      - name: Build and test
+        run: ./mvnw -B -ntp -Drevision=0.3.19-folia.2 -pl fakeplayer-modern-dist -am clean verify
+      - name: Verify service providers
+        run: |
+          jar tf fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar | grep -Fx 'META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge | grep -Fx 'io.github.hello09x.fakeplayer.v1_21_11.spi.NMSBridgeImpl'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge | grep -Fx 'io.github.hello09x.fakeplayer.v26_1_2.spi.NMSBridgeImpl'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar config.yml | tr -d '\r' | grep -Fx 'persistent-data: true'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar plugin.yml | tr -d '\r' | grep -Fx 'folia-supported: true'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar plugin.yml | tr -d '\r' | grep -Fx '      - fakeplayer.command.cmd'

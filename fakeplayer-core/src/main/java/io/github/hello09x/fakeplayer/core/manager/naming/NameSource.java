@@ -1,26 +1,25 @@
 package io.github.hello09x.fakeplayer.core.manager.naming;
 
-import java.util.Collections;
-import java.util.LinkedList;
+import java.util.TreeSet;
 
 public class NameSource {
 
     /**
      * 接下来可以使用的名称序号
      */
-    private final LinkedList<Integer> names;
+    private final TreeSet<Integer> names;
 
     /**
      * 容量
      */
-    private int capacity;
+    private int nextSequence;
 
     public NameSource(int initializeCapacity) {
-        this.capacity = initializeCapacity;
-        this.names = new LinkedList<>();
-        for (int i = 0; i < initializeCapacity; i++) {
-            names.add(i);
-        }
+        // Do not materialize the configured limit. A limit of zero means
+        // unlimited and is represented by Integer.MAX_VALUE in the config;
+        // eagerly allocating that many integers used to be an easy OOM.
+        this.nextSequence = 0;
+        this.names = new TreeSet<>();
     }
 
     public NameSource() {
@@ -33,14 +32,13 @@ public class NameSource {
      * @return 名称序号
      */
     public synchronized int pop() {
-        if (names.isEmpty()) {
-            var newCapacity = capacity * 2;
-            for (int i = capacity; i < newCapacity; i++) {
-                names.add(i);
-            }
-            this.capacity = newCapacity;
+        if (!names.isEmpty()) {
+            return names.pollFirst();
         }
-        return names.pop();
+        if (nextSequence == Integer.MAX_VALUE) {
+            throw new IllegalStateException("Fake-player name sequence exhausted");
+        }
+        return nextSequence++;
     }
 
     /**
@@ -49,20 +47,10 @@ public class NameSource {
      * @param i 名称序号
      */
     public synchronized void push(int i) {
-        if (i >= capacity) {
+        if (i < 0 || i >= nextSequence) {
             return;
         }
-
-        if (names.contains(i)) {
-            return;
-        }
-
-        names.push(i);
-        this.sort();
-    }
-
-    public synchronized void sort() {
-        Collections.sort(this.names);
+        names.add(i);
     }
 
 

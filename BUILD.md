@@ -13,9 +13,12 @@ allow to be redistributed; those must be produced locally with BuildTools.
 ## Prerequisites
 
 - JDK 21 (the project targets Java 21; the api module is compiled with Java 17)
-- Apache Maven 3.8+
+- Apache Maven 3.8+ (or the included `mvnw` wrapper)
 - [BuildTools](https://www.spigotmc.org/wiki/buildtools/) (only for the legacy
   distribution)
+
+On Windows, install Maven or set `FAKEPLAYER_MAVEN_HOME`; the checked-in
+bootstrap script is intended for Unix-like shells and CI.
 
 ## 1. Build the modern distribution
 
@@ -25,20 +28,34 @@ checkout does not need a root `lib/` directory or any BuildTools-generated NMS
 artifact:
 
 ```
-mvn -B -ntp -Drevision=0.3.19-folia.1 -DskipTests \
-    -pl fakeplayer-modern-dist -am clean package
+./mvnw -B -ntp -Drevision=0.3.19-folia.2 \
+    -pl fakeplayer-modern-dist -am clean verify
 ```
 
+The modern distribution forces recreation of its unshaded intermediate JAR,
+so incremental builds are safe; `clean` remains recommended for release and
+runtime verification.
+
 The final plugin is produced at
-`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.1.jar`. The shaded jar
+`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar`. The shaded jar
 contains both modern ServiceLoader providers and keeps OpenInv, PlaceholderAPI
 and CommandAPI as server-side dependencies.
+
+The CI build also checks that both ServiceLoader entries are present in the
+final jar. This prevents a packaging change from silently dropping the
+1.21.11 or 26.x provider.
 
 ## 2. Install remapped NMS artifacts for the legacy distribution
 
 Run BuildTools for every legacy Minecraft version you intend to package:
 
 ```
+java -jar BuildTools.jar --rev 1.20.1 --remapped
+java -jar BuildTools.jar --rev 1.20.2 --remapped
+java -jar BuildTools.jar --rev 1.20.3 --remapped
+java -jar BuildTools.jar --rev 1.20.4 --remapped
+java -jar BuildTools.jar --rev 1.20.5 --remapped
+java -jar BuildTools.jar --rev 1.20.6 --remapped
 java -jar BuildTools.jar --rev 1.21 --remapped
 java -jar BuildTools.jar --rev 1.21.1 --remapped
 java -jar BuildTools.jar --rev 1.21.3 --remapped
@@ -85,10 +102,10 @@ Maven artifact is only used to compile the optional expansion integration.
 After installing the matching BuildTools artifacts for every legacy module, run:
 
 ```
-mvn -B -ntp -Drevision=0.3.19-folia.1 -DskipTests clean package
+./mvnw -B -ntp -Drevision=0.3.19-folia.2 verify
 ```
 
-The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.1.jar` by
+The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.2.jar` by
 `fakeplayer-dist`. Copy the appropriate modern or full distribution jar to
 your server's `plugins/` folder.
 
@@ -110,3 +127,11 @@ Legend:
 | Folia (1.21.x)             | supported via the scheduler adapter |
 | Paper / Purpur 26.1.2      | supported through the reflection-backed NMS adapter |
 | Folia 26.1.2               | supported through the reflection-backed NMS adapter |
+
+Build verification is not a substitute for a live server smoke test. Before a
+release, test spawn/quit/respawn, all action commands, command permissions,
+configuration persistence, BungeeCord cleanup, inventory synchronization and
+shutdown on at least one Paper and one Folia server. Cross-region Folia
+inventory viewing uses a viewer-owned mirror; cross-region riding is rejected
+with an explicit error because Folia does not provide a safe atomic passenger
+mutation across entity regions.

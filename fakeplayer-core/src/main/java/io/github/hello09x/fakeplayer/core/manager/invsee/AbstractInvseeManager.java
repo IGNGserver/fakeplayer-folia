@@ -12,11 +12,21 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerInteractAtEntityEvent;
+import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.InventoryView;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+
+import java.util.Arrays;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static net.kyori.adventure.text.Component.text;
 import static net.kyori.adventure.text.Component.translatable;
@@ -29,6 +39,7 @@ public abstract class AbstractInvseeManager implements InvseeManager {
 
     protected final FakeplayerManager manager;
     protected final FakeplayerList fakeplayerList;
+    private final Map<UUID, CrossRegionSession> crossRegionSessions = new ConcurrentHashMap<>();
 
     protected AbstractInvseeManager(FakeplayerManager manager, FakeplayerList fakeplayerList) {
         this.manager = manager;
@@ -45,11 +56,7 @@ public abstract class AbstractInvseeManager implements InvseeManager {
             return false;
         }
         if (Tasks.isFolia() && !Bukkit.isOwnedByCurrentRegion(whom)) {
-            // Inventory views are owned by the viewer's region, while the
-            // inventory being read is owned by the fake player's region. The
-            // Bukkit inventory APIs cannot safely bridge those regions.
-            viewer.sendMessage(translatable("fakeplayer.command.invsee.error.cross-region"));
-            return false;
+            return this.openCrossRegion(viewer, whom);
         }
         var view = this.openInventory(viewer, whom);
         if (view == null) {
@@ -81,6 +88,87 @@ public abstract class AbstractInvseeManager implements InvseeManager {
 
     protected abstract @Nullable InventoryView openInventory(@NotNull Player viewer, @NotNull Player whom);
 
+    /**
+     * Folia does not allow a viewer-region inventory view to directly expose a
+     * PlayerInventory owned by another region. Use a viewer-owned mirror and
+     * synchronize snapshots back to the fake player on its entity scheduler.
+     */
+    private boolean openCrossRegion(@NotNull Player viewer, @NotNull Player whom) {
+        Tasks.call(Main.getInstance(), whom, () -> copyContents(whom))
+                .thenAccept(contents -> Tasks.run(Main.getInstance(), viewer, () -> {
+                    if (!viewer.isOnline() || fakeplayerList.getByUUID(whom.getUniqueId()) == null) {
+                        return;
+                    }
+
+                    var inventory = Bukkit.createInventory(null, InventoryType.PLAYER);
+                    try {
+                        inventory.setContents(contents);
+                    } catch (IllegalArgumentException failure) {
+                        viewer.sendMessage(translatable("fakeplayer.command.invsee.error.cross-region"));
+                        return;
+                    }
+
+                    var previous = crossRegionSessions.put(
+                            viewer.getUniqueId(),
+                            new CrossRegionSession(whom.getUniqueId(), inventory)
+                    );
+                    if (previous != null) {
+                        syncToFake(previous);
+                    }
+
+                    var view = viewer.openInventory(inventory);
+                    if (view == null) {
+                        crossRegionSessions.remove(viewer.getUniqueId());
+                        return;
+                    }
+                    view.setTitle(ComponentUtils.toString(translatable(
+                            "fakeplayer.manager.inventory.title",
+                            text(whom.getName())
+                    ), viewer.locale()));
+                }))
+                .exceptionally(throwable -> {
+                    Tasks.run(Main.getInstance(), viewer, () -> viewer.sendMessage(
+                            translatable("fakeplayer.command.invsee.error.cross-region")
+                    ));
+                    return null;
+                });
+        return true;
+    }
+
+    private static @NotNull ItemStack[] copyContents(@NotNull Player player) {
+        return copyContents(player.getInventory());
+    }
+
+    private static @NotNull ItemStack[] copyContents(@NotNull Inventory inventory) {
+        return Arrays.stream(inventory.getContents())
+                .map(item -> item == null ? null : item.clone())
+                .toArray(ItemStack[]::new);
+    }
+
+    private void syncToFake(@NotNull CrossRegionSession session) {
+        var fake = fakeplayerList.getByUUID(session.fakePlayerId());
+        if (fake == null) {
+            return;
+        }
+        var contents = copyContents(session.inventory());
+        Tasks.run(Main.getInstance(), fake.getPlayer(), () -> {
+            if (fakeplayerList.getByUUID(session.fakePlayerId()) == fake) {
+                fake.getPlayer().getInventory().setContents(contents);
+            }
+        });
+    }
+
+    private @Nullable CrossRegionSession sessionFor(@NotNull Player viewer) {
+        return sessionFor(viewer, viewer.getOpenInventory());
+    }
+
+    private @Nullable CrossRegionSession sessionFor(@NotNull Player viewer, @NotNull InventoryView view) {
+        var session = crossRegionSessions.get(viewer.getUniqueId());
+        return session == null || session.inventory() != view.getTopInventory()
+                ? null
+                : session;
+    }
+
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void rightClickToInvsee(@NotNull PlayerInteractAtEntityEvent event) {
         if (!((event.getRightClicked()) instanceof Player whom)) {
@@ -105,5 +193,63 @@ public abstract class AbstractInvseeManager implements InvseeManager {
                 event.setCancelled(true);
             }
         }
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void syncCrossRegionClick(@NotNull InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player viewer)) {
+            return;
+        }
+        var session = sessionFor(viewer, event.getView());
+        if (session != null) {
+            scheduleSync(viewer, session);
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void syncCrossRegionDrag(@NotNull InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player viewer)
+                || event.getRawSlots().stream().noneMatch(slot -> slot < event.getView().getTopInventory().getSize())) {
+            return;
+        }
+        var session = sessionFor(viewer, event.getView());
+        if (session != null) {
+            scheduleSync(viewer, session);
+        }
+    }
+
+    private void scheduleSync(@NotNull Player viewer, @NotNull CrossRegionSession session) {
+        Tasks.runDelayed(Main.getInstance(), viewer, () -> {
+            if (crossRegionSessions.get(viewer.getUniqueId()) == session) {
+                syncToFake(session);
+            }
+        }, 1);
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void closeCrossRegion(@NotNull InventoryCloseEvent event) {
+        if (!(event.getPlayer() instanceof Player viewer)) {
+            return;
+        }
+        var session = sessionFor(viewer, event.getView());
+        if (session == null) {
+            return;
+        }
+        crossRegionSessions.remove(viewer.getUniqueId(), session);
+        syncToFake(session);
+    }
+
+    @EventHandler
+    public void quitCrossRegion(@NotNull PlayerQuitEvent event) {
+        var session = crossRegionSessions.remove(event.getPlayer().getUniqueId());
+        if (session != null) {
+            syncToFake(session);
+        }
+    }
+
+    private record CrossRegionSession(
+            @NotNull UUID fakePlayerId,
+            @NotNull Inventory inventory
+    ) {
     }
 }

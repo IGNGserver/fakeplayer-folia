@@ -52,6 +52,11 @@ public class NMSBridgeImpl implements NMSBridge {
     }
 
     @Override
+    public void verifyRuntime() {
+        delegate.verifyRuntime();
+    }
+
+    @Override
     public @NotNull ActionTicker createAction(@NotNull Player player, @NotNull ActionType action, @NotNull ActionSetting setting) {
         return delegate.createAction(player, action, setting);
     }

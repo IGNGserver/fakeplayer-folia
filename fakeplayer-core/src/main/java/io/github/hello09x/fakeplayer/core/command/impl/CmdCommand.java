@@ -10,6 +10,7 @@ import org.bukkit.command.CommandSender;
 import org.jetbrains.annotations.NotNull;
 
 import java.util.Objects;
+import java.util.Locale;
 import java.util.logging.Logger;
 
 import static net.kyori.adventure.text.Component.text;
@@ -20,6 +21,8 @@ import static net.kyori.adventure.text.format.NamedTextColor.RED;
 @Singleton
 public class CmdCommand extends AbstractCommand {
 
+    private static final int MAX_COMMAND_LENGTH = 2048;
+
     private final Logger log = Main.getInstance().getLogger();
 
     /**
@@ -28,8 +31,13 @@ public class CmdCommand extends AbstractCommand {
     public void cmd(@NotNull CommandSender sender, @NotNull CommandArguments args) throws WrapperCommandSyntaxException {
         var fake = super.getFakeplayer(sender, args);
         var command = Objects.requireNonNull((CommandResult) args.get("command"));
+        var commandText = stringifyCommand(command);
+        if (commandText.length() > MAX_COMMAND_LENGTH) {
+            sendTo(sender, translatable("fakeplayer.command.cmd.error.execute-failed", RED));
+            return;
+        }
 
-        var name = command.command().getName();
+        var name = command.command().getName().toLowerCase(Locale.ROOT);
         var senderIsOp = sender.isOp();
         var senderCanUseCmd = sender.hasPermission(Permission.cmd);
         runOnFake(fake, () -> {
@@ -38,7 +46,7 @@ public class CmdCommand extends AbstractCommand {
                 return;
             }
 
-            if (!senderIsOp && (name.equals("fakeplayer") || name.equals("fp"))) {
+            if (!senderIsOp && isPluginControlCommand(name)) {
                 sendTo(sender, translatable("fakeplayer.command.cmd.error.no-permission", RED));
                 return;
             }
@@ -58,8 +66,12 @@ public class CmdCommand extends AbstractCommand {
                     GRAY
             ));
 
-            log.info("%s issued server command: %s".formatted(fake.getName(), stringifyCommand(command)));
+            log.info("%s issued server command: %s".formatted(fake.getName(), commandText));
         });
+    }
+
+    private static boolean isPluginControlCommand(@NotNull String name) {
+        return name.equals("fakeplayer") || name.equals("fp");
     }
 
     private static @NotNull String stringifyCommand(@NotNull CommandResult command) {

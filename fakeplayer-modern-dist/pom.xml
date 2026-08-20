@@ -51,6 +51,20 @@
     <build>
         <finalName>fakeplayer-${revision}</finalName>
         <plugins>
+            <!--
+                This module has no Java sources of its own. Force the
+                unshaded project JAR to be recreated before shade runs;
+                otherwise an incremental build can feed the previous shaded
+                JAR back into Shade and silently preserve stale provider code.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <forceCreation>true</forceCreation>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>

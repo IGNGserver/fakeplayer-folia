@@ -47,6 +47,26 @@ public class NMSBridgeImpl implements NMSBridge {
     }
 
     @Override
+    public void verifyRuntime() {
+        var required = new String[]{
+                "net.minecraft.server.MinecraftServer",
+                "net.minecraft.server.level.ServerPlayer",
+                "net.minecraft.server.players.PlayerList",
+                "net.minecraft.server.network.CommonListenerCookie",
+                "net.minecraft.network.Connection",
+                "net.minecraft.network.protocol.PacketFlow",
+                "net.minecraft.network.protocol.game.GameProtocols",
+                "net.minecraft.network.RegistryFriendlyByteBuf",
+                "net.minecraft.server.level.ClientInformation",
+                "com.mojang.authlib.GameProfile",
+                "io.netty.channel.embedded.EmbeddedChannel"
+        };
+        for (var className : required) {
+            NmsAccess.classForName(className);
+        }
+    }
+
+    @Override
     public @NotNull ActionTicker createAction(@NotNull Player player, @NotNull ActionType action, @NotNull ActionSetting setting) {
         return new ActionTickerImpl(this, player, action, setting);
     }

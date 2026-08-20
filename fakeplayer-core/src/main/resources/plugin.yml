@@ -154,4 +154,4 @@ permissions:
       - fakeplayer.tp
       - fakeplayer.exp
       - fakeplayer.action
-      - fakeplayer.cmd
+      - fakeplayer.command.cmd

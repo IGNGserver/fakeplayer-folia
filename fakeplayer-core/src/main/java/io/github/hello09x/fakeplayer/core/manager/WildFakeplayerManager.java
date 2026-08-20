@@ -13,6 +13,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -36,10 +37,13 @@ public class WildFakeplayerManager implements PluginMessageListener {
      */
     private final static int CLEANUP_THRESHOLD = 2;
     private final static int CLEANUP_PERIOD = 6000;
+    private final static long MALFORMED_LOG_INTERVAL_MILLIS = 60_000L;
 
     private final FakeplayerManager manager;
     private final FakeplayerConfig config;
     private final Map<String, AtomicInteger> offline = new ConcurrentHashMap<>();
+    private final AtomicLong malformedMessages = new AtomicLong();
+    private volatile long malformedLogAt;
     private Tasks.Task cleanupTask;
 
     @Inject
@@ -59,29 +63,35 @@ public class WildFakeplayerManager implements PluginMessageListener {
             return;
         }
 
-        @SuppressWarnings("UnstableApiUsage")
-        var in = ByteStreams.newDataInput(message);
-        if (!in.readUTF().equals(SUB_CHANNEL)) {
-            return;
-        }
-
-        if (!in.readUTF().equals("ALL")) {
-            return;
-        }
-
-        var players = new HashSet<String>();
-        players.addAll(Arrays.asList(in.readUTF().split(", ")));
-        if (Tasks.isFolia()) {
-            // Plugin-message callbacks run on the sender's region. The online
-            // player set is global state, so collect it and perform cleanup on
-            // the global region instead of reading it here.
-            Tasks.runGlobal(Main.getInstance(), () -> {
+        try {
+            var parsed = BungeePlayerListParser.parse(message);
+            if (parsed.isEmpty()) {
+                return;
+            }
+            var players = new HashSet<>(parsed.get());
+            if (Tasks.isFolia()) {
+                // Plugin-message callbacks run on the sender's region. The online
+                // player set is global state, so collect it and perform cleanup on
+                // the global region instead of reading it here.
+                Tasks.runGlobal(Main.getInstance(), () -> {
+                    players.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+                    this.cleanup0(players);
+                });
+            } else {
                 players.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
                 this.cleanup0(players);
-            });
-        } else {
-            players.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
-            this.cleanup0(players);
+            }
+        } catch (RuntimeException malformed) {
+            this.logMalformed(malformed.getMessage());
+        }
+    }
+
+    private void logMalformed(@NotNull String reason) {
+        var now = System.currentTimeMillis();
+        var count = malformedMessages.incrementAndGet();
+        if (now - malformedLogAt >= MALFORMED_LOG_INTERVAL_MILLIS) {
+            malformedLogAt = now;
+            log.warning("Ignored malformed BungeeCord plugin message (" + reason + ", count=" + count + ")");
         }
     }
 
@@ -94,11 +104,12 @@ public class WildFakeplayerManager implements PluginMessageListener {
         @SuppressWarnings("all")
         var group = manager.getAll()
                            .stream()
+                           .filter(target -> manager.getCreatorName(target) != null)
                            .collect(Collectors.groupingBy(manager::getCreatorName));
 
         for (var entry : group.entrySet()) {
             var creator = entry.getKey();
-            if (creator.equals("CONSOLE")) {
+            if (creator == null || creator.equals("CONSOLE")) {
                 continue;
             }
 

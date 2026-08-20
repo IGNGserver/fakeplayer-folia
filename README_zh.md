@@ -2,7 +2,11 @@
 
 [English](README.md) | 简体中文
 
-这是 [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer) 的 Folia 移植分支，保留上游功能，并补充 Folia 调度器适配、Minecraft 1.21.11 与 26.x 版本适配。
+[![构建](https://github.com/IGNGserver/fakeplayer-folia/actions/workflows/build.yml/badge.svg)](https://github.com/IGNGserver/fakeplayer-folia/actions/workflows/build.yml)
+[![最新版本](https://img.shields.io/github/v/release/IGNGserver/fakeplayer-folia)](https://github.com/IGNGserver/fakeplayer-folia/releases)
+[![许可证](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
+
+这是 [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer) 的 Folia 移植分支，保留上游功能，并补充 Folia 调度器适配、Minecraft 1.21.11 与 26.1.x 版本适配。
 
 FakePlayer 会在服务器中创建一个对 Bukkit/Paper/插件而言都像真实玩家的假人，可用于区块加载、刷怪、自动化操作和插件联动。
 
@@ -12,17 +16,19 @@ FakePlayer 会在服务器中创建一个对 Bukkit/Paper/插件而言都像真�
 | --- | --- | --- |
 | Paper / Purpur | 1.20.x–1.21.x | 支持 |
 | Folia | 1.21.x（包含 1.21.11） | 支持，使用区域调度器 |
-| Paper / Purpur | 26.1.2 及后续 26.x | 支持，使用反射适配器 |
-| Folia | 26.1.2 及后续 26.x | 按同一现代适配器支持 |
+| Paper / Purpur | 26.1.x | 使用反射适配器，已实测 26.1.2 |
+| Folia | 26.1.x | 使用反射适配器，已实测 26.1.2 |
 
 运行要求：
 
-- Java 21 或更高版本。
+- Minecraft 1.20.x–1.21.11 使用 Java 21；Minecraft 26.1.x 使用 Java 25。
 - Paper、Purpur 或 Folia 服务端。
 - [CommandAPI 11.2.0](https://commandapi.jorel.dev)（必需）。
 - [OpenInv](https://github.com/Jikoo/OpenInv) 和 [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 为可选联动插件。
 
 Folia 没有传统的全局主线程。本分支会根据操作对象切换到实体、区域、全局或异步调度器；Paper/Purpur 则继续使用传统调度器。
+
+本分支已经在真实服务端完成以下烟测：插件加载、NMS bridge 选择、生成/列表/状态、假人执行命令、单体销毁、远坐标生成、`killall`、空列表清理和正常关服。客户端 UI、完整权限组合、皮肤、跨区背包查看以及安全审计不属于这组烟测的覆盖范围。
 
 ## 安装
 
@@ -34,6 +40,9 @@ Folia 没有传统的全局主线程。本分支会根据操作对象切换到�
 6. 将 `config.tmpl.yml` 复制或重命名为 `config.yml`，按需修改后执行 `/fp reload`。
 
 OpenInv、PlaceholderAPI 不会被打包进 FakePlayer；只有对应插件存在时，相关联动功能才会启用。
+
+> 安全提示：`/fp cmd` 会让假人执行它自身拥有权限的命令。请严格限制
+> `fakeplayer.command.cmd`，并只在配置的 `allow-commands` 中放行明确需要的命令。
 
 ## 主要功能
 
@@ -154,11 +163,11 @@ self-commands:
 现代发行版推荐使用以下命令：
 
 ```bash
-mvn -B -ntp -Drevision=0.3.19-folia.1 -DskipTests \
-    -pl fakeplayer-modern-dist -am clean package
+./mvnw -B -ntp -Drevision=0.3.19-folia.2 \
+    -pl fakeplayer-modern-dist -am clean verify
 ```
 
-产物位于 `fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.1.jar`。现代发行版不需要手动准备根目录 `lib/`，OpenInv、PlaceholderAPI 和 CommandAPI 仍由服务器单独安装。
+产物位于 `fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar`。现代发行版不需要手动准备根目录 `lib/`，OpenInv、PlaceholderAPI 和 CommandAPI 仍由服务器单独安装。
 
 旧版本完整构建需要使用 BuildTools 准备对应的重映射 NMS 依赖。详细说明见 [`BUILD.md`](BUILD.md)。
 

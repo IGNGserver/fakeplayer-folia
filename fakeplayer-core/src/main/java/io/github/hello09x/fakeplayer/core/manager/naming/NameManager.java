@@ -99,9 +99,13 @@ public class NameManager {
         {
             var base = serverId + ":" + name;
             var legacyUUID = UUID.nameUUIDFromBytes(base.getBytes(StandardCharsets.UTF_8));
-            if (legacyUsedIdRepository.contains(legacyUUID)) {
-                profileRepository.insert(name, legacyUUID);
-                legacyUsedIdRepository.remove(legacyUUID);
+            if (legacyUsedIdRepository.removeIfPresent(legacyUUID)) {
+                try {
+                    profileRepository.insert(name, legacyUUID);
+                } catch (RuntimeException failure) {
+                    legacyUsedIdRepository.add(legacyUUID);
+                    throw failure;
+                }
                 return legacyUUID;
             }
         }
@@ -296,6 +300,7 @@ public class NameManager {
             }
 
             if (Bukkit.getPlayerExact(name) != null) {
+                this.unregister(source, seq);
                 continue;
             }
 
@@ -332,6 +337,7 @@ public class NameManager {
 
         var name = this.sequenceName(context.source(), sequence);
         if (context.onlineNames().contains(name)) {
+            this.unregister(context.source(), sequence);
             return this.nextRegularNameAsync(context, attempt + 1);
         }
 
@@ -375,15 +381,16 @@ public class NameManager {
     }
 
     private @NotNull CompletableFuture<UUID> getUUIDFromNameAsync(@NotNull String name) {
-        return asyncUUIDs.computeIfAbsent(name, key -> {
-            var future = this.resolveUUIDFromNameAsync(key);
-            future.whenComplete((ignored, throwable) -> {
-                if (throwable != null) {
-                    asyncUUIDs.remove(key, future);
-                }
-            });
-            return future;
+        var future = asyncUUIDs.computeIfAbsent(name, this::resolveUUIDFromNameAsync);
+        // Attach the cleanup callback only after computeIfAbsent has returned.
+        // The lookup can complete extremely quickly; attaching it inside the
+        // mapping function could run before the map inserts the future and
+        // leave a completed future retained forever.
+        future.whenComplete((ignored, throwable) -> {
+            // This map is an in-flight coalescer, not an unbounded cache.
+            asyncUUIDs.remove(name, future);
         });
+        return future;
     }
 
     private @NotNull CompletableFuture<UUID> resolveUUIDFromNameAsync(@NotNull String name) {
@@ -397,11 +404,15 @@ public class NameManager {
                     var legacyUUID = UUID.nameUUIDFromBytes((serverId + ":" + name).getBytes(StandardCharsets.UTF_8));
                     return CompletableFuture
                             .supplyAsync(() -> {
-                                if (!legacyUsedIdRepository.contains(legacyUUID)) {
+                                if (!legacyUsedIdRepository.removeIfPresent(legacyUUID)) {
                                     return null;
                                 }
-                                profileRepository.insert(name, legacyUUID);
-                                legacyUsedIdRepository.remove(legacyUUID);
+                                try {
+                                    profileRepository.insert(name, legacyUUID);
+                                } catch (RuntimeException failure) {
+                                    legacyUsedIdRepository.add(legacyUUID);
+                                    throw failure;
+                                }
                                 return legacyUUID;
                             })
                             .thenCompose(migrated -> migrated == null

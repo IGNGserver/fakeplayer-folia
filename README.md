@@ -10,7 +10,11 @@
 
 English | [简体中文](README_zh.md)
 
-This is a server side plugin inspired by [Carpet-Mod](https://github.com/gnembon/fabric-carpet) for Minecraft `1.20.x`, `1.21.x` (incl. `1.21.11`), the new `26.x` version format, and above.
+[![Build](https://github.com/IGNGserver/fakeplayer-folia/actions/workflows/build.yml/badge.svg)](https://github.com/IGNGserver/fakeplayer-folia/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/IGNGserver/fakeplayer-folia)](https://github.com/IGNGserver/fakeplayer-folia/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
+
+This is a server-side plugin inspired by [Carpet-Mod](https://github.com/gnembon/fabric-carpet) for Minecraft `1.20.x`, `1.21.x` (including `1.21.11`) and the new `26.1.x` version line.
 
 It runs on **Paper**, **Purpur** and **Folia**. On Folia every task is dispatched
 through a scheduler adapter to the correct region/global/async scheduler, so the
@@ -21,7 +25,7 @@ plugin behaves like upstream on Paper while being region-thread-safe on Folia.
 ## Features
 
 + Lets you spawn fake players who look like real to the server, they can keep chunk loading
-+ Fake players can be recolonized by vanilla commands and plugin commands, such as `/ban`, `/tp`
++ Fake players can be controlled by vanilla commands and plugin commands, such as `/ban` and `/tp`
 + You can open and edit their inventory via `/fp invsee` or Right-Clicking on them
 + You can fully control their moving, jumping, attacking... What's better ? Make it periodical
 + Each player can configure his personal configuration
@@ -29,7 +33,26 @@ plugin behaves like upstream on Paper while being region-thread-safe on Folia.
 ## Requirements
 
 + [Paper](https://papermc.io), [Purpur](http://purpurmc.org), or [Folia](https://github.com/PaperMC/Folia)
-+ [CommandAPI](https://commandapi.jorel.dev) Plugin `11.2.0`
++ [CommandAPI](https://commandapi.jorel.dev) plugin `11.2.0`
++ Java 21 for Minecraft `1.20.x`–`1.21.11`; Java 25 for Minecraft `26.1.x`.
+
+## Tested versions
+
+The modern distribution is tested against real server processes. The current
+release test matrix is:
+
+| Server | Build | Result |
+| --- | --- | --- |
+| Paper | 1.21.11-132 | passed |
+| Folia | 1.21.11-14 | passed |
+| Paper | 26.1.2-74 | passed with Java 25 |
+| Folia | 26.1.2-8 | passed with Java 25 |
+
+The live smoke tests cover plugin loading, NMS bridge selection, fake-player
+spawn/list/status, player command execution, single-player removal, distant
+overworld spawning, `killall`, empty-list cleanup and graceful shutdown. They
+do not replace client-side UI, permission-matrix, skin, inventory-viewing or
+security-audit testing.
 
 ## Config file
 
@@ -38,6 +61,10 @@ You need to rename this file to `config.yml` as your configuration file.
 This approach can let you preview new content when you are upgrading it.
 
 [Click to visit file content](fakeplayer-core/src/main/resources/config.yml)
+
+> Security note: `/fp cmd` lets a fake player execute commands for which that
+> fake player has permission. Keep `fakeplayer.command.cmd` restricted and use
+> the `allow-commands` configuration only for deliberately approved commands.
 
 ## Commands
 
@@ -72,7 +99,7 @@ This approach can let you preview new content when you are upgrading it.
 | /fp stop      | Stop all actions                          | fakeplayer.command.stop      |                                                                 |
 | /fp turn      | Turn around                               | fakeplayer.command.turn      |                                                                 |
 | /fp look      | Look at specified location                | fakeplayer.command.look      |                                                                 |
-| /fp move      | Move                                      | fakeplayer.command.mvoe      |                                                                 |
+| /fp move      | Move                                      | fakeplayer.command.move      |                                                                 |
 | /fp ride      | Ride                                      | fakeplayer.command.ride      |                                                                 |
 | /fp sneak     | Sneak                                     | fakeplayer.command.sneak     |                                                                 |
 | /fp sprint    | Sprinting                                 | fakeplayer.command.sprint    |                                                                 |
@@ -167,15 +194,15 @@ If your server does not restrict various player commands, you can use this direc
 
 + `%fakeplayer_total%`: Total count of fake players
 + `%fakeplayer_creator%`: The creator name of a fake player
-+ `%fakeplayer_actions`: Active actions of a fake player such as : `USE|ATTACK`
++ `%fakeplayer_actions%`: Active actions of a fake player such as `USE|ATTACK`
 
-# Custom Translation
+## Custom translation
 
 1. Create a `message` folder in `plugins/fakeplayer`
 2. Copy [this file](fakeplayer-core/src/main/resources/message/message.properties) to `message` folder
 3. Rename the file to `message_language_region.properties` such as `message_en_us.properties`
 4. Edit your `config.yml`, set `i18n.locale` to the name suffix which you just created such as `en_us`
-5. Type `/fp reload-translation` to reload translation file. If you change `i18n.local`, you should `/fp reload` first
+5. Type `/fp reload-translation` to reload the translation file. If you change `i18n.locale`, run `/fp reload` first.
 
 **Make sure the translation file is encoded with UTF-8**
 
@@ -207,8 +234,23 @@ self-commands:
   - '/login abc123!'
 ```
 
-# Build Project
+## Build project
 
-See the [introduction](./BUILD.md).
+The recommended modern build is:
+
+```bash
+./mvnw -B -ntp -Drevision=0.3.19-folia.2 \
+    -pl fakeplayer-modern-dist -am clean verify
+```
+
+The final JAR is written to
+`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar`. See
+[`BUILD.md`](BUILD.md) for legacy modules and BuildTools requirements.
+
+## Support and feedback
+
+- Upstream: [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer)
+- Bug reports: [Issues](https://github.com/IGNGserver/fakeplayer-folia/issues)
+- Releases: [GitHub Releases](https://github.com/IGNGserver/fakeplayer-folia/releases)
 
 

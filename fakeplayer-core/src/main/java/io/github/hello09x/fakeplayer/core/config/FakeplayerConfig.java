@@ -196,7 +196,18 @@ public class FakeplayerConfig extends PluginConfig {
         this.afterQuitCommands = file.getStringList("after-quit-commands");
         this.nameTemplate = file.getString("name-template", "");
         this.dropInventoryOnQuiting = file.getBoolean("drop-inventory-on-quiting", true);
-        this.persistData = file.getBoolean("persist-data", true);
+        // The generated configuration documents `persistent-data`. Keep
+        // accepting the old spelling so existing installations do not
+        // silently change, but prefer the documented key whenever both are
+        // present.
+        if (file.contains("persistent-data")) {
+            this.persistData = file.getBoolean("persistent-data", true);
+        } else {
+            this.persistData = file.getBoolean("persist-data", true);
+            if (file.contains("persist-data")) {
+                log.warning("persist-data is deprecated; use persistent-data instead.");
+            }
+        }
         this.kickOnDead = file.getBoolean("kick-on-dead", true);
         this.checkForUpdates = file.getBoolean("check-for-updates", true);
         this.namePattern = getNamePattern(file);
@@ -206,8 +217,10 @@ public class FakeplayerConfig extends PluginConfig {
         this.lifespan = getLifespan(file);
         this.allowCommands = file.getStringList("allow-commands")
                                  .stream()
+                                 .map(String::trim)
                                  .map(c -> c.startsWith("/") ? c.substring(1) : c)
                                  .filter(c -> !c.isBlank())
+                                 .map(c -> c.toLowerCase(Locale.ROOT))
                                  .collect(Collectors.toSet());
 
         this.defaultOnlineSkin = file.getBoolean("default-online-skin", false);

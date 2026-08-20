@@ -103,8 +103,10 @@ public final class Main extends JavaPlugin {
                     log.info("New version: " + release.getTagName());
                     log.info("Address: " + meta.getWebsite());
                     log.info("Update Log");
-                    for (var line : release.getBody().split("\n")) {
-                        log.info("\t" + line);
+                    var body = java.util.Objects.requireNonNullElse(release.getBody(), "");
+                    var lines = body.split("\n", 128);
+                    for (var line : lines) {
+                        log.info("\t" + line.substring(0, Math.min(line.length(), 512)));
                     }
                 }
 

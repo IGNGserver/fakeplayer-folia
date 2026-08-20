@@ -77,20 +77,26 @@ public class FakeplayerFeatureManager {
      * the repository query and immutable map assembly then run asynchronously.
      */
     public @NotNull CompletableFuture<Map<Feature, FeatureInstance>> getFeaturesAsync(@NotNull CommandSender sender) {
-        if (Tasks.isFolia() && sender instanceof Player player) {
-            return Tasks.call(Main.getInstance(), player, () -> new PermissionSnapshot(
-                            player.getUniqueId(),
-                            java.util.Arrays.stream(Feature.values()).collect(Collectors.toMap(
-                                    Function.identity(),
-                                    feature -> feature.testPermissions(player)
-                            ))
-                    ))
-                    .thenCompose(snapshot -> CompletableFuture.supplyAsync(() -> buildFeatures(
-                            snapshot.playerId(),
-                            snapshot.permissions()
-                    )));
+        if (sender instanceof Player player) {
+            var snapshot = Tasks.isFolia()
+                    ? Tasks.call(Main.getInstance(), player, () -> snapshotPermissions(player))
+                    : CompletableFuture.completedFuture(snapshotPermissions(player));
+            return snapshot.thenCompose(value -> CompletableFuture.supplyAsync(() -> buildFeatures(
+                    value.playerId(),
+                    value.permissions()
+            )));
         }
         return CompletableFuture.supplyAsync(() -> getFeatures(sender));
+    }
+
+    private @NotNull PermissionSnapshot snapshotPermissions(@NotNull Player player) {
+        return new PermissionSnapshot(
+                player.getUniqueId(),
+                java.util.Arrays.stream(Feature.values()).collect(Collectors.toMap(
+                        Function.identity(),
+                        feature -> feature.testPermissions(player)
+                ))
+        );
     }
 
     private @NotNull Map<Feature, FeatureInstance> buildFeatures(
@@ -118,12 +124,42 @@ public class FakeplayerFeatureManager {
     }
 
     public void setFeature(@NotNull Player player, @NotNull Feature key, @NotNull String value) {
+        if (!key.getOptions().contains(value)) {
+            throw new IllegalArgumentException("Unsupported option for " + key.name() + ": " + value);
+        }
         this.repository.saveOrUpdate(new UserConfig(
                 null,
                 player.getUniqueId(),
                 key,
                 value
         ));
+    }
+
+    /**
+     * Capture the player identity on its region and perform the blocking JDBC
+     * write asynchronously. The command layer can safely use this on both
+     * Paper and Folia.
+     */
+    public @NotNull CompletableFuture<Void> setFeatureAsync(
+            @NotNull Player player,
+            @NotNull Feature key,
+            @NotNull String value
+    ) {
+        if (!key.getOptions().contains(value)) {
+            return CompletableFuture.failedFuture(
+                    new IllegalArgumentException("Unsupported option for " + key.name() + ": " + value)
+            );
+        }
+
+        var playerId = Tasks.isFolia()
+                ? Tasks.call(Main.getInstance(), player, player::getUniqueId)
+                : CompletableFuture.completedFuture(player.getUniqueId());
+        return playerId.thenAcceptAsync(id -> this.repository.saveOrUpdate(new UserConfig(
+                null,
+                id,
+                key,
+                value
+        ))).thenApply(ignored -> null);
     }
 
 }

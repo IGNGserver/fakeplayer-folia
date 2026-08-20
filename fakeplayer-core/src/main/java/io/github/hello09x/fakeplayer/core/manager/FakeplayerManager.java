@@ -35,6 +35,8 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
 
@@ -55,6 +57,7 @@ public class FakeplayerManager {
     private final NMSBridge nms;
     private final FakeplayerConfig config;
     private final Tasks.Task lagMonitor;
+    private final SpawnQuota spawnQuota = new SpawnQuota();
     /**
      * Console commands are executed on Folia's global region. Keep a tail per
      * fake player so post-spawn/post-quit hooks cannot overtake one another.
@@ -99,7 +102,9 @@ public class FakeplayerManager {
             long lifespan
     ) {
         var spawnLocation = spawnAt.clone();
-        return this.checkLimitAsync(creator).thenCompose(limitIgnored -> {
+        return this.reserveSpawnAsync(creator).thenCompose(reservation -> {
+            var sequenceRef = new AtomicReference<io.github.hello09x.fakeplayer.core.manager.naming.SequenceName>();
+            var fakeplayerRef = new AtomicReference<Fakeplayer>();
             var sequenceName = name == null
                     ? nameManager.getRegularNameAsync(creator)
                     : nameManager.getSpecifiedNameAsync(name);
@@ -107,19 +112,27 @@ public class FakeplayerManager {
             // ServerPlayer construction touches the target world/region. On Folia it
             // must happen in the region selected by the spawn location, not on the
             // command sender's region or on an arbitrary completion thread.
-            return sequenceName.thenCompose(sn -> AddressUtils.getAddressAsync(creator)
-                    .thenCompose(creatorIp -> {
+            return sequenceName.thenCompose(sn -> {
+                        sequenceRef.set(sn);
                         log.info("UUID of fake player %s is %s".formatted(sn.name(), sn.uuid()));
                         return Tasks.callAt(Main.getInstance(), spawnLocation, () -> new Fakeplayer(
                                 creator,
-                                creatorIp,
+                                reservation.address(),
                                 sn,
                                 lifespan,
                                 spawnLocation
                         ));
-                    }))
+                    })
                     .thenCompose(fp -> {
-                        this.playerList.add(fp);
+                        fakeplayerRef.set(fp);
+                        try {
+                            if (!this.spawnQuota.commit(reservation.reservation(), () -> this.playerList.add(fp))) {
+                                throw new IllegalStateException("Fake-player registry rejected duplicate name or UUID: " + fp.getName());
+                            }
+                        } catch (Throwable failure) {
+                            this.rollbackSpawn(fp, failure);
+                            return CompletableFuture.failedFuture(failure);
+                        }
                         return this.dispatchCommandsEarly(fp, this.config.getPreSpawnCommands())
                                 .thenCompose(ignored -> {
                                     var configsFuture = featureManager.getFeaturesAsync(creator);
@@ -142,6 +155,15 @@ public class FakeplayerManager {
                                         this.rollbackSpawn(fp, throwable);
                                     }
                                 });
+                    })
+                    .whenComplete((ignored, throwable) -> {
+                        if (throwable != null && fakeplayerRef.get() == null) {
+                            var sequence = sequenceRef.get();
+                            if (sequence != null) {
+                                this.nameManager.unregister(sequence);
+                            }
+                        }
+                        reservation.reservation().close();
                     });
         });
     }
@@ -612,65 +634,47 @@ public class FakeplayerManager {
     }
 
     /**
-     * 检测限制, 不满足条件则抛出异常
-     *
-     * @param creator 创建者
+     * Reserve all configured spawn quotas before doing any asynchronous name,
+     * database, or entity work. The address is read once and reused by the
+     * fake-player record, so the IP check and the created record cannot drift.
      */
-    private @NotNull CompletableFuture<Void> checkLimitAsync(@NotNull CommandSender creator) {
-        if (!Tasks.isFolia()) {
-            this.checkLimit(creator);
-            return CompletableFuture.completedFuture(null);
-        }
-
-        if (creator.isOp()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        if (this.playerList.getSize() >= this.config.getServerLimit()) {
-            return CompletableFuture.failedFuture(
-                    new CommandException(translatable("fakeplayer.command.spawn.error.server-limit"))
-            );
-        }
-
-        if (this.playerList.getByCreator(creator.getName()).size() >= this.config.getPlayerLimit()) {
-            return CompletableFuture.failedFuture(
-                    new CommandException(translatable("fakeplayer.command.spawn.error.player-limit"))
-            );
-        }
-
-        if (!this.config.isDetectIp()) {
-            return CompletableFuture.completedFuture(null);
-        }
-
-        return AddressUtils.getAddressAsync(creator).thenAccept(address -> {
-            if (this.countByAddress(address) >= this.config.getPlayerLimit()) {
-                throw new CommandException(translatable("fakeplayer.command.spawn.error.ip-limit"));
+    private @NotNull CompletableFuture<SpawnContext> reserveSpawnAsync(@NotNull CommandSender creator) {
+        var creatorName = creator.getName();
+        var bypassLimits = creator.isOp();
+        return AddressUtils.getAddressAsync(creator).thenApply(address -> {
+            try {
+                var reservation = this.spawnQuota.reserve(
+                        creatorName,
+                        address,
+                        this.config.isDetectIp(),
+                        this.config.getPlayerLimit(),
+                        this.config.getServerLimit(),
+                        this.playerList.getSize(),
+                        this.playerList.countByCreator(creatorName),
+                        this.countByAddress(address),
+                        bypassLimits
+                );
+                return new SpawnContext(address, reservation);
+            } catch (SpawnQuota.LimitExceededException failure) {
+                throw new CompletionException(this.limitException(failure.limit()));
             }
         });
     }
 
-    private void checkLimit(@NotNull CommandSender creator) throws CommandException {
-        if (creator.isOp()) {
-            return;
-        }
-
-        if (this.playerList.getSize() >= this.config.getServerLimit()) {
-            throw new CommandException(translatable("fakeplayer.command.spawn.error.server-limit"));
-        }
-
-        if (this.playerList.getByCreator(creator.getName()).size() >= this.config.getPlayerLimit()) {
-            throw new CommandException(translatable("fakeplayer.command.spawn.error.player-limit"));
-        }
-
-        if (this.config.isDetectIp() && this.countByAddress(AddressUtils.getAddress(creator)) >= this.config.getPlayerLimit()) {
-            throw new CommandException(translatable("fakeplayer.command.spawn.error.ip-limit"));
-        }
+    private @NotNull CommandException limitException(@NotNull SpawnQuota.Limit limit) {
+        var key = switch (limit) {
+            case SERVER -> "fakeplayer.command.spawn.error.server-limit";
+            case PLAYER -> "fakeplayer.command.spawn.error.player-limit";
+            case IP -> "fakeplayer.command.spawn.error.ip-limit";
+        };
+        return new CommandException(translatable(key));
     }
 
     public void onDisable() {
         Exceptions.suppress(Main.getInstance(), () -> this.removeAll("Plugin disabled"));
         Exceptions.suppress(Main.getInstance(), this.lagMonitor::cancel);
         this.commandChains.clear();
+        this.spawnQuota.clear();
     }
 
     private void rollbackSpawn(@NotNull Fakeplayer fakeplayer, @NotNull Throwable throwable) {
@@ -702,6 +706,12 @@ public class FakeplayerManager {
             log.warning("Failed to remove failed fake player " + fakeplayer.getName() + ": " + kickFailure);
         }
         log.warning("Failed to spawn fake player " + fakeplayer.getName() + ": " + throwable);
+    }
+
+    private record SpawnContext(
+            @NotNull String address,
+            @NotNull SpawnQuota.Reservation reservation
+    ) {
     }
 
 }

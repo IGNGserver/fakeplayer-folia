@@ -167,7 +167,12 @@ final class NMSNetworkImpl implements NMSNetwork {
         // path owns the connection teardown there; this method only releases
         // fakeplayer-side state. Paper 26 needs the explicit fallback because
         // its synthetic EmbeddedChannel may not invoke the native callback.
-        if (currentConnection != null && !Tasks.isFolia()) {
+        // Paper 1.21.11 already completes Player#kick through the native
+        // connection and PlayerQuitEvent path. Re-entering Connection#disconnect
+        // from that callback retires the same entity scheduler twice. The
+        // embedded-channel fallback is only required by the 26.x Paper runtime;
+        // the 1.21.11 provider delegates here only for shared protocol code.
+        if (currentConnection != null && !Tasks.isFolia() && isPaper26OrLater()) {
             try {
                 // Player#kick delegates to the packet listener. On Paper 26
                 // the EmbeddedChannel's outbound completion listener can be
@@ -219,6 +224,11 @@ final class NMSNetworkImpl implements NMSNetwork {
         this.listener = null;
         this.playerHandle = null;
         this.player = null;
+    }
+
+    private static boolean isPaper26OrLater() {
+        String version = Bukkit.getMinecraftVersion();
+        return version != null && version.startsWith("26.");
     }
 
     private static void forcePlayerListenerDisconnect(Object serverHandle, Object playerHandle) {
