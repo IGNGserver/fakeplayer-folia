@@ -28,7 +28,7 @@ checkout does not need a root `lib/` directory or any BuildTools-generated NMS
 artifact:
 
 ```
-./mvnw -B -ntp -Drevision=0.3.19-folia.2 \
+./mvnw -B -ntp -Drevision=0.3.19-folia.3 \
     -pl fakeplayer-modern-dist -am clean verify
 ```
 
@@ -37,7 +37,7 @@ so incremental builds are safe; `clean` remains recommended for release and
 runtime verification.
 
 The final plugin is produced at
-`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar`. The shaded jar
+`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar`. The shaded jar
 contains both modern ServiceLoader providers and keeps OpenInv, PlaceholderAPI
 and CommandAPI as server-side dependencies.
 
@@ -101,10 +101,10 @@ Maven artifact is only used to compile the optional expansion integration.
 After installing the matching BuildTools artifacts for every legacy module, run:
 
 ```
-./mvnw -B -ntp -Drevision=0.3.19-folia.2 verify
+./mvnw -B -ntp -Drevision=0.3.19-folia.3 verify
 ```
 
-The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.2.jar` by
+The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.3.jar` by
 `fakeplayer-dist`. Copy the appropriate modern or full distribution jar to
 your server's `plugins/` folder.
 

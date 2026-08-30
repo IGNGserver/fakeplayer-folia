@@ -12,7 +12,7 @@ FakePlayer 可以在服务器内部创建一个能够被原版系统和其他插
 
 ## 当前版本
 
-当前正式版本为 [v0.3.19-folia.2](https://github.com/IGNGserver/fakeplayer-folia/releases/tag/v0.3.19-folia.2)。
+当前正式版本为 [v0.3.19-folia.3](https://github.com/IGNGserver/fakeplayer-folia/releases/tag/v0.3.19-folia.3)。
 
 Folia 跨区域查看假人背包时使用查看者区域的只读镜像；同区域查看以及 Paper/Purpur 仍保持正常可编辑行为。
 
@@ -230,14 +230,14 @@ Folia 不存在可随意访问所有实体的传统主线程。本分支会根�
 构建现代发行包需要 JDK 21、Maven 3.8+ 或仓库内置的 Maven Wrapper：
 
 ```bash
-./mvnw -B -ntp -Drevision=0.3.19-folia.2 \
+./mvnw -B -ntp -Drevision=0.3.19-folia.3 \
     -pl fakeplayer-modern-dist -am clean verify
 ```
 
 产物路径：
 
 ```text
-fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar
+fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar
 ```
 
 现代发行包不需要手动准备根目录 `lib/`。旧版本模块的完整打包需要本地运行 BuildTools，具体步骤见 [`BUILD.md`](BUILD.md)。
