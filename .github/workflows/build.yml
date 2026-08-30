@@ -31,12 +31,12 @@ jobs:
             exit 1
           fi
       - name: Build and test
-        run: ./mvnw -B -ntp -Drevision=0.3.19-folia.2 -pl fakeplayer-modern-dist -am clean verify
+        run: ./mvnw -B -ntp -Drevision=0.3.19-folia.3 -pl fakeplayer-modern-dist -am clean verify
       - name: Verify service providers
         run: |
-          jar tf fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar | grep -Fx 'META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge'
-          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge | grep -Fx 'io.github.hello09x.fakeplayer.v1_21_11.spi.NMSBridgeImpl'
-          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge | grep -Fx 'io.github.hello09x.fakeplayer.v26_1_2.spi.NMSBridgeImpl'
-          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar config.yml | tr -d '\r' | grep -Fx 'persistent-data: true'
-          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar plugin.yml | tr -d '\r' | grep -Fx 'folia-supported: true'
-          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar plugin.yml | tr -d '\r' | grep -Fx '      - fakeplayer.command.cmd'
+          jar tf fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar | grep -Fx 'META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge | grep -Fx 'io.github.hello09x.fakeplayer.v1_21_11.spi.NMSBridgeImpl'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar META-INF/services/io.github.hello09x.fakeplayer.api.spi.NMSBridge | grep -Fx 'io.github.hello09x.fakeplayer.v26_1_2.spi.NMSBridgeImpl'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar config.yml | tr -d '\r' | grep -Fx 'persistent-data: true'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar plugin.yml | tr -d '\r' | grep -Fx 'folia-supported: true'
+          unzip -p fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar plugin.yml | tr -d '\r' | grep -Fx '      - fakeplayer.command.cmd'

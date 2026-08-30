@@ -177,11 +177,11 @@ self-commands:
 现代发行版推荐使用以下命令：
 
 ```bash
-./mvnw -B -ntp -Drevision=0.3.19-folia.2 \
+./mvnw -B -ntp -Drevision=0.3.19-folia.3 \
     -pl fakeplayer-modern-dist -am clean verify
 ```
 
-产物位于 `fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.2.jar`。现代发行版不需要手动准备根目录 `lib/`，OpenInv、PlaceholderAPI 和 CommandAPI 仍由服务器单独安装。
+产物位于 `fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar`。现代发行版不需要手动准备根目录 `lib/`，OpenInv、PlaceholderAPI 和 CommandAPI 仍由服务器单独安装。
 
 旧版本完整构建需要使用 BuildTools 准备对应的重映射 NMS 依赖。详细说明见 [`BUILD.md`](BUILD.md)。
 
