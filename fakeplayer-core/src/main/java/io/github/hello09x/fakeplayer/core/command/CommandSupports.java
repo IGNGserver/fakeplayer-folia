@@ -168,19 +168,21 @@ public abstract class CommandSupports {
             }
 
             return arg;
-        }).replaceSuggestions(ArgumentSuggestions.stringCollectionAsync(info -> CompletableFuture.supplyAsync(() -> {
+        }).replaceSuggestions(ArgumentSuggestions.stringCollectionAsync(info -> {
             var key = (Feature) info.previousArgs().get(configKeyNodeName);
             if (key == null) {
-                return Collections.emptyList();
+                return CompletableFuture.completedFuture(Collections.emptyList());
             }
 
             var arg = info.currentArg().toLowerCase(Locale.ENGLISH);
             if (arg.isEmpty()) {
-                return key.getOptions();
+                return CompletableFuture.completedFuture(key.getOptions());
             }
 
-            return key.getOptions().stream().filter(option -> option.contains(arg)).toList();
-        })));
+            return CompletableFuture.completedFuture(key.getOptions().stream()
+                    .filter(option -> option.contains(arg))
+                    .toList());
+        }));
     }
 
     public static boolean hasFakeplayerForRespawn(@NotNull CommandSender sender) {

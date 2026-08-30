@@ -7,6 +7,7 @@ import com.google.inject.Singleton;
 import io.github.hello09x.devtools.core.config.ConfigUtils;
 import io.github.hello09x.devtools.core.config.PluginConfig;
 import io.github.hello09x.fakeplayer.core.Main;
+import io.github.hello09x.fakeplayer.core.lifecycle.LifecycleCommandPairing;
 import io.github.hello09x.fakeplayer.core.repository.model.Feature;
 import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import lombok.Getter;
@@ -86,6 +87,11 @@ public class FakeplayerConfig extends PluginConfig {
      * 创建前执行命令
      */
     private List<String> preSpawnCommands;
+
+    /**
+     * 创建失败时按逆序执行的幂等补偿命令
+     */
+    private List<String> preSpawnRollbackCommands;
 
     /**
      * 创建时执行命令
@@ -189,7 +195,12 @@ public class FakeplayerConfig extends PluginConfig {
         this.detectIp = file.getBoolean("detect-ip", false);
         this.kaleTps = file.getInt("kale-tps", 0);
         this.selfCommands = file.getStringList("self-commands");
-        this.preSpawnCommands = file.getStringList("pre-spawn-commands");
+        var preSpawnPair = LifecycleCommandPairing.normalize(
+                file.getStringList("pre-spawn-commands"),
+                file.getStringList("pre-spawn-rollback-commands")
+        );
+        this.preSpawnCommands = preSpawnPair.forward();
+        this.preSpawnRollbackCommands = preSpawnPair.rollback();
         this.postSpawnCommands = file.getStringList("post-spawn-commands");
         this.afterSpawnCommands = file.getStringList("after-spawn-commands");
         this.postQuitCommands = file.getStringList("post-quit-commands");

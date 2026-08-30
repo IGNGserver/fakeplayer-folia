@@ -13,17 +13,20 @@ import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.listener.FakeplayerLifecycleListener;
 import io.github.hello09x.fakeplayer.core.listener.FakeplayerListener;
 import io.github.hello09x.fakeplayer.core.listener.PlayerListener;
+import io.github.hello09x.fakeplayer.core.lifecycle.LifecycleCommandCoordinator;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerAutofishManager;
+import io.github.hello09x.fakeplayer.core.manager.FakeplayerManager;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerReplenishManager;
 import io.github.hello09x.fakeplayer.core.manager.WildFakeplayerManager;
+import io.github.hello09x.fakeplayer.core.manager.action.ActionManager;
 import io.github.hello09x.fakeplayer.core.manager.invsee.InvseeManager;
 import io.github.hello09x.fakeplayer.core.placeholder.FakeplayerPlaceholderExpansion;
+import io.github.hello09x.fakeplayer.core.repository.UsedIdRepository;
+import io.github.hello09x.fakeplayer.core.util.async.PluginAsyncExecutor;
 import io.github.hello09x.fakeplayer.core.util.update.UpdateChecker;
 import lombok.Getter;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
-
-import java.util.concurrent.CompletableFuture;
 
 public final class Main extends JavaPlugin {
 
@@ -51,11 +54,20 @@ public final class Main extends JavaPlugin {
                         TranslatorUtils.getDefaultLocale(Main.getInstance())))
         );
 
+        // Recover write-ahead lifecycle finalizers before commands, listeners,
+        // or plugin messaging can create new externally visible state. A
+        // failed recovery aborts enable and retains its journal for retry.
+        injector.getInstance(FakeplayerConfig.class);
+        injector.getInstance(LifecycleCommandCoordinator.class).recoverPendingSynchronously();
+
         injector.getInstance(CommandRegistry.class).register();
         {
             var messenger = getServer().getMessenger();
-            messenger.registerIncomingPluginChannel(this, "BungeeCord", injector.getInstance(WildFakeplayerManager.class));
             messenger.registerOutgoingPluginChannel(this, "BungeeCord");
+            // Starts authoritative local cleanup. On BungeeCord the manager
+            // deliberately fail-closes without registering an incoming
+            // PlayerList listener.
+            injector.getInstance(WildFakeplayerManager.class);
         }
 
         {
@@ -86,9 +98,9 @@ public final class Main extends JavaPlugin {
     }
 
     public void checkForUpdatesAsync() {
-        CompletableFuture.runAsync(() -> {
+        this.injector.getInstance(PluginAsyncExecutor.class).runAsync(() -> {
             var meta = this.getPluginMeta();
-            var checker = new UpdateChecker("tanyaofei", "minecraft-fakeplayer");
+            var checker = new UpdateChecker("IGNGserver", "fakeplayer-folia");
             try {
                 var release = checker.getLastRelease();
 
@@ -118,6 +130,19 @@ public final class Main extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        var currentInjector = this.injector;
+        if (currentInjector != null) {
+            Exceptions.suppress(this, () -> currentInjector.getInstance(FakeplayerLifecycleListener.class).onDisable());
+            var fakeplayerManager = currentInjector.getInstance(FakeplayerManager.class);
+            Exceptions.suppress(this, fakeplayerManager::beginShutdown);
+            // Cancel/interrupt database continuations before synchronously
+            // recovering their write-ahead journal.
+            Exceptions.suppress(this, () -> currentInjector.getInstance(PluginAsyncExecutor.class).shutdown());
+            Exceptions.suppress(this, fakeplayerManager::onDisable);
+            Exceptions.suppress(this, () -> currentInjector.getInstance(ActionManager.class).onDisable());
+            Exceptions.suppress(this, () -> currentInjector.getInstance(WildFakeplayerManager.class).onDisable());
+            Exceptions.suppress(this, () -> currentInjector.getInstance(UsedIdRepository.class).onDisable());
+        }
         {
             Exceptions.suppress(this, () -> {
                 var messenger = getServer().getMessenger();

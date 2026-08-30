@@ -94,7 +94,6 @@ public class CommandRegistry {
                         "type fp ? for more information",
                         "hello09x [汤姆]"
                 )
-                .withPermission(Permission.spawn)
                 .withSubcommands(
                         command("select")
                                 .withPermission(Permission.select)
@@ -103,7 +102,7 @@ public class CommandRegistry {
                                 .withOptionalArguments(fakeplayer("name"))
                                 .executesPlayer(selectCommand::select),
                         command("selection")
-                                .withPermission(Permission.select)
+                                .withPermission(Permission.selection)
                                 .withShortDescription("fakeplayer.command.selection.description")
                                 .withRequirement(CommandSupports::needSelect)
                                 .executesPlayer(selectCommand::selection),

@@ -22,7 +22,7 @@
 
         It depends only on paper/fakeplayer-api/core (no spigot NMS jar, no
         specialsource remapping) so the fork compiles and the ServiceLoader picks
-        it up when Bukkit reports a 26.x version. The bridge uses Mojang-named
+        it up when Bukkit reports the verified 26.1.2 version. The bridge uses Mojang-named
         runtime classes through a small reflection layer instead of a versioned
         CraftBukkit dependency.
     -->

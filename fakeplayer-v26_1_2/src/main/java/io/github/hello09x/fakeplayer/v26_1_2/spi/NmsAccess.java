@@ -198,6 +198,35 @@ final class NmsAccess {
         }
     }
 
+    /** Fail during bridge selection instead of failing on the first spawn. */
+    static void requireMethod(@NotNull String className, @NotNull String name, int parameterCount) {
+        if (allMethods(classForName(className)).noneMatch(method -> method.getName().equals(name)
+                && method.getParameterCount() == parameterCount)) {
+            throw new IllegalStateException("Minecraft 26.x method is unavailable: " + className + "."
+                    + name + "(" + parameterCount + " args)");
+        }
+    }
+
+    /** Fail during bridge selection when a required reflective field moved. */
+    static void requireField(@NotNull String className, @NotNull String name) {
+        try {
+            findField(classForName(className), name);
+        } catch (NoSuchFieldException missing) {
+            throw new IllegalStateException("Minecraft 26.x field is unavailable: " + className + "." + name, missing);
+        }
+    }
+
+    /** Validate constructor arity used by the adapter without instantiating NMS objects. */
+    static void requireConstructor(@NotNull String className, int parameterCount) {
+        var constructors = classForName(className).getDeclaredConstructors();
+        for (var constructor : constructors) {
+            if (constructor.getParameterCount() == parameterCount) {
+                return;
+            }
+        }
+        throw new IllegalStateException("Minecraft 26.x constructor is unavailable: " + className + "(" + parameterCount + " args)");
+    }
+
     static boolean bool(Object value) {
         return value instanceof Boolean b && b;
     }

@@ -56,16 +56,15 @@ public class LookAtEntityAction implements Action {
         }
         var loc = player.getLocation();
         Entity nearest = null;
-        double distance = 0;
+        double distance = Double.POSITIVE_INFINITY;
         for (var entity : entities) {
-            if (nearest == null) {
+            if (!player.getWorld().equals(entity.getWorld())) {
+                continue;
+            }
+            var d = loc.distanceSquared(entity.getLocation());
+            if (d < distance) {
                 nearest = entity;
-            } else {
-                var d = loc.distance(entity.getLocation());
-                if (d < distance) {
-                    nearest = entity;
-                    distance = d;
-                }
+                distance = d;
             }
         }
         return nearest;

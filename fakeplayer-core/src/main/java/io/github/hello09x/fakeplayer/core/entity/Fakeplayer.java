@@ -138,7 +138,7 @@ public class Fakeplayer {
                         ).color(RED));
                     }
                 })
-                .thenComposeAsync(nul -> Tasks.<CompletableFuture<Void>>callAt(Main.getInstance(), option.spawnAt(), () -> {
+                .thenCompose(nul -> Tasks.<CompletableFuture<Void>>callAt(Main.getInstance(), option.spawnAt(), () -> {
                     this.player.setPersistent(config.isPersistData());
                     this.player.setSleepingIgnored(true);
                     this.handle.setPlayBefore(); // 可避免一些插件的第一次入服欢迎信息

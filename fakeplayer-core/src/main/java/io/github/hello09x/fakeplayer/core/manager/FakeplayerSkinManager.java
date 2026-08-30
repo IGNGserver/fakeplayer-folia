@@ -11,6 +11,7 @@ import io.github.hello09x.fakeplayer.core.Main;
 import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.repository.FakeplayerSkinRepository;
 import io.github.hello09x.fakeplayer.core.repository.model.FakePlayerSkin;
+import io.github.hello09x.fakeplayer.core.util.async.PluginAsyncExecutor;
 import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.bukkit.Bukkit;
 import org.bukkit.OfflinePlayer;
@@ -34,15 +35,21 @@ public class FakeplayerSkinManager {
     private final static Logger log = Main.getInstance().getLogger();
     private final FakeplayerSkinRepository repository;
     private final FakeplayerConfig config;
+    private final PluginAsyncExecutor asyncExecutor;
     private final Cache<UUID, PlayerProfile> profileCache = CacheBuilder
             .newBuilder()
             .expireAfterWrite(Duration.ofHours(1))
             .build();
 
     @Inject
-    public FakeplayerSkinManager(FakeplayerSkinRepository repository, FakeplayerConfig config) {
+    public FakeplayerSkinManager(
+            FakeplayerSkinRepository repository,
+            FakeplayerConfig config,
+            PluginAsyncExecutor asyncExecutor
+    ) {
         this.repository = repository;
         this.config = config;
+        this.asyncExecutor = asyncExecutor;
     }
 
     @CanIgnoreReturnValue
@@ -90,7 +97,7 @@ public class FakeplayerSkinManager {
                     if (skin == null) {
                         return CompletableFuture.completedFuture(false);
                     }
-                    return CompletableFuture.supplyAsync(() -> {
+                    return asyncExecutor.supplyAsync(() -> {
                         repository.insertOrUpdate(skin);
                         return true;
                     });
@@ -119,8 +126,8 @@ public class FakeplayerSkinManager {
         var creatorId = Tasks.isFolia()
                 ? Tasks.call(Main.getInstance(), p, p::getUniqueId)
                 : CompletableFuture.completedFuture(p.getUniqueId());
-        return creatorId.thenCompose(id -> CompletableFuture
-                .supplyAsync(() -> repository.selectByCreatorIdAndPlayerId(id, targetId))
+        return creatorId
+                .thenCompose(id -> asyncExecutor.supplyAsync(() -> repository.selectByCreatorIdAndPlayerId(id, targetId)))
                 .thenCompose(skin -> {
                     if (skin != null) {
                         return this.getOfflinePlayerAsync(skin.targetId())
@@ -133,7 +140,7 @@ public class FakeplayerSkinManager {
                                 .thenApply(ignored -> null);
                     }
                     return this.useOnlineSkinAsync(to, p).thenApply(ignored -> null);
-                }));
+                });
     }
 
     private @NotNull CompletableFuture<OfflinePlayer> getOfflinePlayerAsync(@NotNull UUID uuid) {
@@ -196,7 +203,13 @@ public class FakeplayerSkinManager {
 
     @CanIgnoreReturnValue
     public @NotNull CompletableFuture<Boolean> useOnlineSkinAsync(@NotNull Player to, @NotNull OfflinePlayer from) {
-        return this.readProfileAsync(from).thenComposeAsync(source -> {
+        // Move the profile inspection off the entity/global scheduler without
+        // exposing the raw executor to CompletableFuture. Every queued stage is
+        // then represented in PluginAsyncExecutor.pending and is cancellable on
+        // plugin shutdown.
+        return this.readProfileAsync(from)
+                .thenCompose(source -> asyncExecutor.supplyCpuAsync(() -> source))
+                .thenCompose(source -> {
             var profile = source.profile();
             var profileId = source.uuid();
             if (!profile.hasTextures()) {
@@ -212,7 +225,7 @@ public class FakeplayerSkinManager {
             }
 
             var profileToComplete = profile;
-            return CompletableFuture
+            return asyncExecutor
                     .supplyAsync(() -> {
                         try {
                             return profileToComplete.complete() ? ProfileCompleteResult.SUCCESS : ProfileCompleteResult.FAILED;
@@ -224,7 +237,7 @@ public class FakeplayerSkinManager {
                             return ProfileCompleteResult.ERROR;
                         }
                     })
-                    .thenComposeAsync(result -> {
+                    .thenCompose(result -> {
                         if (result == ProfileCompleteResult.SUCCESS && profileToComplete.hasTextures()) {
                             profileCache.put(profileId, profileToComplete);
                         }

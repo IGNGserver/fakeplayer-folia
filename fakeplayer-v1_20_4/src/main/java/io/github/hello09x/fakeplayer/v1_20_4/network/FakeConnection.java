@@ -21,7 +21,7 @@ public class FakeConnection extends Connection {
 
     @Override
     public boolean isConnected() {
-        return true;
+        return this.channel != null && this.channel.isActive();
     }
 
     @Override
@@ -35,6 +35,10 @@ public class FakeConnection extends Connection {
     public void setProtocolAttr(@NotNull ConnectionProtocol protocol) {
         this.channel.attr(Connection.ATTRIBUTE_SERVERBOUND_PROTOCOL).set(protocol.codec(PacketFlow.SERVERBOUND));
         this.channel.attr(Connection.ATTRIBUTE_CLIENTBOUND_PROTOCOL).set(protocol.codec(PacketFlow.CLIENTBOUND));
+    }
+
+    public void closeChannel() {
+        this.channel.close();
     }
 
 }

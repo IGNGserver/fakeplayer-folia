@@ -14,11 +14,14 @@ English | [简体中文](README_zh.md)
 [![Latest release](https://img.shields.io/github/v/release/IGNGserver/fakeplayer-folia)](https://github.com/IGNGserver/fakeplayer-folia/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 
-This is a server-side plugin inspired by [Carpet-Mod](https://github.com/gnembon/fabric-carpet) for Minecraft `1.20.x`, `1.21.x` (including `1.21.11`) and the new `26.1.x` version line.
+This is a server-side plugin inspired by [Carpet-Mod](https://github.com/gnembon/fabric-carpet) for Minecraft `1.20.x`, `1.21.x` (including `1.21.11`) and the tested `26.1.2` version.
 
 It runs on **Paper**, **Purpur** and **Folia**. On Folia every task is dispatched
 through a scheduler adapter to the correct region/global/async scheduler, so the
 plugin behaves like upstream on Paper while being region-thread-safe on Folia.
+
+On Folia, an inventory view opened across regions uses a viewer-owned read-only
+mirror; same-region views and Paper/Purpur retain the normal editable inventory.
 
 [Click me](https://youtu.be/NePaDz-P5nI) to visit a demo video.
 
@@ -34,7 +37,7 @@ plugin behaves like upstream on Paper while being region-thread-safe on Folia.
 
 + [Paper](https://papermc.io), [Purpur](http://purpurmc.org), or [Folia](https://github.com/PaperMC/Folia)
 + [CommandAPI](https://commandapi.jorel.dev) plugin `11.2.0`
-+ Java 21 for Minecraft `1.20.x`–`1.21.11`; Java 25 for Minecraft `26.1.x`.
++ Java 21 for Minecraft `1.20.x`–`1.21.11`; Java 25 for Minecraft `26.1.2`.
 
 ## Tested versions
 
@@ -64,7 +67,12 @@ This approach can let you preview new content when you are upgrading it.
 
 > Security note: `/fp cmd` lets a fake player execute commands for which that
 > fake player has permission. Keep `fakeplayer.command.cmd` restricted and use
-> the `allow-commands` configuration only for deliberately approved commands.
+> the legacy `allow-commands` configuration only for deliberately approved
+> commands; prefer permission-based control for new installations.
+
+`/fp reload` reloads ordinary configuration values. Changing `invsee-implement`
+or installing/removing OpenInv requires a server restart because the inventory
+viewer implementation is selected during plugin startup.
 
 ## Commands
 
@@ -128,6 +136,30 @@ Command examples:
 | replenish          | Whether to auto-replenish                                                                                                           |
 | autofish           | Whether to autofish                                                                                                                 |
 
+## Lifecycle command safety
+
+Every non-empty `pre-spawn-commands` entry must have an idempotent inverse at
+the same index in `pre-spawn-rollback-commands`. The plugin journals these
+commands before spawning and runs compensation in reverse order after a failed
+spawn, normal quit, plugin disable, or crash recovery. An unsafe unmatched
+configuration fails plugin startup.
+
+Recovery is at-least-once: `pre-spawn-rollback-commands`,
+`post-quit-commands`, and `after-quit-commands` must all be idempotent. A
+process can stop after an external command has taken effect but before its
+database checkpoint is advanced, in which case startup safely retries it.
+
+```yaml
+pre-spawn-commands:
+  - 'whitelist add %p'
+pre-spawn-rollback-commands:
+  - 'whitelist remove %p'
+```
+
+When BungeeCord mode is enabled, `follow-quiting` fails closed to disabled.
+The built-in `PlayerList` response has no nonce or authentication and is never
+allowed to authorize destructive fake-player deletion.
+
 ## Permissions
 
 <details>
@@ -187,7 +219,6 @@ Each command has its own permission node, but we provided some permissions packs
 - fakeplayer.config.autofish - Autofish
 
 If your server does not restrict various player commands, you can use this directly.
-`fakeplayer.basic` includes all secure permissions, except for `/fp cmd` commands.
 </details>
 
 ## Placeholder Variables
@@ -219,7 +250,7 @@ prevent-kicking: ALWAYS
 
 ## Fake players do not attract aggression
 
-By default, fake players are in invincible mode. Players need to manually turn off invincible mode with `/fp config set invulnerable false` to attract aggression. After turning it off, they will
+By default, fake players are not in invincible mode. If invincibility is enabled in your configuration or personal settings, turn it off with `/fp config set invulnerable false` to attract aggression. After turning it off, they will
 receive hunger and health effects. You may need to use `res` or beacon to ensure the fake player's `hunger` and `health`.
 
 ## Fake players automatically log out after a while

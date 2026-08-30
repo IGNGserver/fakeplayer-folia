@@ -6,7 +6,7 @@
 [![最新版本](https://img.shields.io/github/v/release/IGNGserver/fakeplayer-folia)](https://github.com/IGNGserver/fakeplayer-folia/releases)
 [![许可证](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 
-这是 [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer) 的 Folia 移植分支，保留上游功能，并补充 Folia 调度器适配、Minecraft 1.21.11 与 26.1.x 版本适配。
+这是 [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer) 的 Folia 移植分支，保留上游功能，并补充 Folia 调度器适配、Minecraft 1.21.11 与已验证的 26.1.2 适配。
 
 FakePlayer 会在服务器中创建一个对 Bukkit/Paper/插件而言都像真实玩家的假人，可用于区块加载、刷怪、自动化操作和插件联动。
 
@@ -16,17 +16,19 @@ FakePlayer 会在服务器中创建一个对 Bukkit/Paper/插件而言都像真�
 | --- | --- | --- |
 | Paper / Purpur | 1.20.x–1.21.x | 支持 |
 | Folia | 1.21.x（包含 1.21.11） | 支持，使用区域调度器 |
-| Paper / Purpur | 26.1.x | 使用反射适配器，已实测 26.1.2 |
-| Folia | 26.1.x | 使用反射适配器，已实测 26.1.2 |
+| Paper / Purpur | 26.1.2 | 使用反射适配器，已实测 |
+| Folia | 26.1.2 | 使用反射适配器，已实测 |
 
 运行要求：
 
-- Minecraft 1.20.x–1.21.11 使用 Java 21；Minecraft 26.1.x 使用 Java 25。
+- Minecraft 1.20.x–1.21.11 使用 Java 21；Minecraft 26.1.2 使用 Java 25。
 - Paper、Purpur 或 Folia 服务端。
 - [CommandAPI 11.2.0](https://commandapi.jorel.dev)（必需）。
 - [OpenInv](https://github.com/Jikoo/OpenInv) 和 [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 为可选联动插件。
 
 Folia 没有传统的全局主线程。本分支会根据操作对象切换到实体、区域、全局或异步调度器；Paper/Purpur 则继续使用传统调度器。
+
+Folia 跨区域查看假人背包时使用查看者区域的只读镜像；同区域查看以及 Paper/Purpur 仍保持正常可编辑行为。
 
 本分支已经在真实服务端完成以下烟测：插件加载、NMS bridge 选择、生成/列表/状态、假人执行命令、单体销毁、远坐标生成、`killall`、空列表清理和正常关服。客户端 UI、完整权限组合、皮肤、跨区背包查看以及安全审计不属于这组烟测的覆盖范围。
 
@@ -41,8 +43,11 @@ Folia 没有传统的全局主线程。本分支会根据操作对象切换到�
 
 OpenInv、PlaceholderAPI 不会被打包进 FakePlayer；只有对应插件存在时，相关联动功能才会启用。
 
+`/fp reload` 会重载普通配置。修改 `invsee-implement` 或安装/卸载 OpenInv
+后需要重启服务器，背包查看实现是在插件启动时选择的。
+
 > 安全提示：`/fp cmd` 会让假人执行它自身拥有权限的命令。请严格限制
-> `fakeplayer.command.cmd`，并只在配置的 `allow-commands` 中放行明确需要的命令。
+> `fakeplayer.command.cmd`。`allow-commands` 仅为旧配置兼容保留，新增配置建议使用权限控制。
 
 ## 主要功能
 
@@ -101,13 +106,22 @@ OpenInv、PlaceholderAPI 不会被打包进 FakePlayer；只有对应插件存�
 - `fakeplayer.spawn`：创建、移除、查看、配置和管理假人。
 - `fakeplayer.tp`：传送、交换位置。
 - `fakeplayer.action`：动作控制、快捷栏、自动补货和自动钓鱼。
-- `fakeplayer.basic`：大多数安全操作，但不包含 `/fp cmd`。
-
 不要直接向普通玩家授予 `fakeplayer.command.cmd`，否则他们可能让假人执行其自身拥有权限的任意命令。建议使用配置文件中的命令白名单限制可执行命令。
 
 ## 配置
 
 模板配置位于 [`fakeplayer-core/src/main/resources/config.yml`](fakeplayer-core/src/main/resources/config.yml)，运行后会复制为 `plugins/fakeplayer/config.tmpl.yml`。
+
+`pre-spawn-commands` 中每个非空命令都必须在 `pre-spawn-rollback-commands` 的同一序号配置幂等反向命令。补偿日志会在生成前写入数据库；生成失败、假人退出、插件停止或进程崩溃恢复时都会按逆序执行。不完整的配对会使插件拒绝启动。
+
+恢复语义是“至少一次”：进程可能在外部命令已生效、但数据库进度尚未推进时停止。因此 `pre-spawn-rollback-commands`、`post-quit-commands` 和 `after-quit-commands` 都必须可安全重复执行。
+
+```yaml
+pre-spawn-commands:
+  - 'whitelist add %p'
+pre-spawn-rollback-commands:
+  - 'whitelist remove %p'
+```
 
 常用个人配置项：
 
@@ -144,7 +158,7 @@ self-commands:
 
 ### 假人不会吸引仇恨
 
-默认开启无敌。执行以下命令关闭：
+默认不开启无敌；如果你的配置或个人设置开启了无敌，可执行以下命令关闭：
 
 ```text
 /fp config set invulnerable false
@@ -152,11 +166,11 @@ self-commands:
 
 ### BungeeCord/代理服务器
 
-如果 `spigot.yml` 中启用了 `bungeecord: true`，插件会按代理在线列表处理创建者切换服务器的情况。跨服使用时仍应确认代理、登录和背包插件的兼容配置。
+如果 `spigot.yml` 中启用了 `bungeecord: true`，`follow-quiting` 会安全失效为禁用。BungeeCord 内建 `PlayerList` 没有 nonce 或签名，插件不再接收该响应，也不允许它驱动假人删除。在安装带 nonce/HMAC 的认证代理伴生端之前，请显式移除跨服创建者的假人。
 
 ### UUID 安全
 
-插件会记录已经使用过的假人 UUID，避免真实玩家使用相同 UUID 登录。如果误占用 UUID，请先备份数据，再按照 [`README.md`](README.md) 或插件配置说明处理 `used-uuid.txt` 中对应的记录。
+插件会记录已经使用过的假人 UUID，避免真实玩家使用相同 UUID 登录。如果误占用 UUID，请先备份数据，再按照 [`README.md`](README.md) 或插件配置说明处理 `used-uuids.txt` 中对应的记录。
 
 ## 构建
 

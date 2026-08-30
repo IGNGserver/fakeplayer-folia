@@ -8,7 +8,6 @@ import io.github.hello09x.fakeplayer.core.repository.model.FakePlayerProfile;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -37,7 +36,29 @@ public class FakeplayerProfileRepository {
     }
 
     public @Nullable UUID selectUUIDByName(@NotNull String name) {
-        return Optional.ofNullable(this.selectByName(name)).map(FakePlayerProfile::uuid).map(UUID::fromString).orElse(null);
+        var profile = this.selectByName(name);
+        if (profile == null) {
+            return null;
+        }
+        try {
+            return UUID.fromString(profile.uuid());
+        } catch (RuntimeException malformed) {
+            // Returning null here is not isolation: NameManager interprets null
+            // as "no row" and attempts an INSERT with the same unique name,
+            // so the corrupted row still blocks spawning with a less useful
+            // constraint violation. Preserve the distinction for callers.
+            throw new MalformedProfileException(name, profile.uuid(), malformed);
+        }
+    }
+
+    public static final class MalformedProfileException extends IllegalStateException {
+        public MalformedProfileException(
+                @NotNull String name,
+                @Nullable String rawUuid,
+                @NotNull Throwable cause
+        ) {
+            super("Malformed UUID in fake_player_profile for '" + name + "': " + rawUuid, cause);
+        }
     }
 
     public @Nullable FakePlayerProfile selectByName(@NotNull String name) {

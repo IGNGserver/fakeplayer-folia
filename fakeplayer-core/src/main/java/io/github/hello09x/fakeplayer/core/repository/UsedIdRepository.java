@@ -26,7 +26,6 @@ import java.util.logging.Logger;
 @Singleton
 public class UsedIdRepository {
 
-    public final static UsedIdRepository instance = new UsedIdRepository();
     private final static Logger log = Main.getInstance().getLogger();
 
     private final Set<UUID> UUIDS = ConcurrentHashMap.newKeySet();
@@ -44,20 +43,12 @@ public class UsedIdRepository {
         UUIDS.add(uuid);
     }
 
-    public void remove(@NotNull UUID uuid) {
-        UUIDS.remove(uuid);
-    }
-
     /**
      * Atomically claim a legacy UUID during migration. This prevents two
      * concurrent name-resolution tasks from both migrating the same record.
      */
     public boolean removeIfPresent(@NotNull UUID uuid) {
         return UUIDS.remove(uuid);
-    }
-
-    public boolean exists(@NotNull UUID uuid) {
-        return UUIDS.contains(uuid);
     }
 
     /**

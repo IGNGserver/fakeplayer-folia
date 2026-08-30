@@ -7,6 +7,7 @@ import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.repository.UserConfigRepository;
 import io.github.hello09x.fakeplayer.core.repository.model.Feature;
 import io.github.hello09x.fakeplayer.core.repository.model.UserConfig;
+import io.github.hello09x.fakeplayer.core.util.async.PluginAsyncExecutor;
 import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -26,27 +27,21 @@ public class FakeplayerFeatureManager {
 
     private final UserConfigRepository repository;
     private final FakeplayerConfig config;
+    private final PluginAsyncExecutor asyncExecutor;
 
     @Inject
-    public FakeplayerFeatureManager(UserConfigRepository repository, FakeplayerConfig config) {
+    public FakeplayerFeatureManager(
+            UserConfigRepository repository,
+            FakeplayerConfig config,
+            PluginAsyncExecutor asyncExecutor
+    ) {
         this.repository = repository;
         this.config = config;
+        this.asyncExecutor = asyncExecutor;
     }
 
     private @NotNull String getDefaultOption(@NotNull Feature key) {
         return Optional.ofNullable(config.getDefaultFeatures().get(key)).filter(option -> key.getOptions().contains(option)).orElse(key.getDefaultOption());
-    }
-
-    public @NotNull FeatureInstance getFeature(@NotNull Player player, @NotNull Feature key) {
-        if (!key.testPermissions(player)) {
-            return new FeatureInstance(key, this.getDefaultOption(key));
-        }
-
-        String value = Optional.ofNullable(repository.selectByPlayerIdAndKey(player.getUniqueId(), key))
-                               .map(UserConfig::value)
-                               .orElseGet(() -> this.getDefaultOption(key));
-
-        return new FeatureInstance(key, value);
     }
 
     public @NotNull Map<Feature, FeatureInstance> getFeatures(@NotNull CommandSender sender) {
@@ -81,12 +76,12 @@ public class FakeplayerFeatureManager {
             var snapshot = Tasks.isFolia()
                     ? Tasks.call(Main.getInstance(), player, () -> snapshotPermissions(player))
                     : CompletableFuture.completedFuture(snapshotPermissions(player));
-            return snapshot.thenCompose(value -> CompletableFuture.supplyAsync(() -> buildFeatures(
+            return snapshot.thenCompose(value -> asyncExecutor.supplyAsync(() -> buildFeatures(
                     value.playerId(),
                     value.permissions()
             )));
         }
-        return CompletableFuture.supplyAsync(() -> getFeatures(sender));
+        return asyncExecutor.supplyAsync(() -> getFeatures(sender));
     }
 
     private @NotNull PermissionSnapshot snapshotPermissions(@NotNull Player player) {
@@ -154,12 +149,12 @@ public class FakeplayerFeatureManager {
         var playerId = Tasks.isFolia()
                 ? Tasks.call(Main.getInstance(), player, player::getUniqueId)
                 : CompletableFuture.completedFuture(player.getUniqueId());
-        return playerId.thenAcceptAsync(id -> this.repository.saveOrUpdate(new UserConfig(
+        return playerId.thenCompose(id -> asyncExecutor.runAsync(() -> this.repository.saveOrUpdate(new UserConfig(
                 null,
                 id,
                 key,
                 value
-        ))).thenApply(ignored -> null);
+        ))));
     }
 
 }

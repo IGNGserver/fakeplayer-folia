@@ -61,4 +61,9 @@ public class NMSNetworkImpl implements NMSNetwork {
         return this.serverGamePacketListener;
     }
 
+    @Override
+    public void close() {
+        this.connection.closeChannel();
+    }
+
 }

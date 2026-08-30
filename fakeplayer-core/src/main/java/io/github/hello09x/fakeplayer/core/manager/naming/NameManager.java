@@ -7,6 +7,7 @@ import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.manager.naming.exception.IllegalCustomNameException;
 import io.github.hello09x.fakeplayer.core.repository.FakeplayerProfileRepository;
 import io.github.hello09x.fakeplayer.core.repository.UsedIdRepository;
+import io.github.hello09x.fakeplayer.core.util.async.PluginAsyncExecutor;
 import io.github.hello09x.fakeplayer.core.util.scheduler.Tasks;
 import org.apache.commons.io.IOUtils;
 import org.apache.commons.lang3.RandomStringUtils;
@@ -25,6 +26,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.stream.Collectors;
 import java.util.logging.Logger;
 
@@ -42,6 +44,7 @@ public class NameManager {
     private final UsedIdRepository legacyUsedIdRepository;
     private final FakeplayerProfileRepository profileRepository;
     private final FakeplayerConfig config;
+    private final PluginAsyncExecutor asyncExecutor;
     private final Map<String, NameSource> nameSources = new ConcurrentHashMap<>();
     /** Coalesce concurrent Folia UUID lookups for the same persistent name. */
     private final Map<String, CompletableFuture<UUID>> asyncUUIDs = new ConcurrentHashMap<>();
@@ -49,10 +52,16 @@ public class NameManager {
     private final String serverId;
 
     @Inject
-    public NameManager(UsedIdRepository legacyUsedIdRepository, FakeplayerProfileRepository profileRepository, FakeplayerConfig config) {
+    public NameManager(
+            UsedIdRepository legacyUsedIdRepository,
+            FakeplayerProfileRepository profileRepository,
+            FakeplayerConfig config,
+            PluginAsyncExecutor asyncExecutor
+    ) {
         this.legacyUsedIdRepository = legacyUsedIdRepository;
         this.profileRepository = profileRepository;
         this.config = config;
+        this.asyncExecutor = asyncExecutor;
 
         var file = new File(Main.getInstance().getDataFolder(), "serverid");
         serverId = Optional.ofNullable(loadServerId(file)).orElseGet(() -> {
@@ -145,7 +154,7 @@ public class NameManager {
                 return CompletableFuture.failedFuture(this.onlineNameError(normalized));
             }
 
-            return CompletableFuture
+            return asyncExecutor
                     .supplyAsync(() -> lookup.hasPlayedBefore()
                             && !legacyUsedIdRepository.contains(lookup.uuid())
                             && !profileRepository.existsByUUID(lookup.uuid()))
@@ -304,7 +313,14 @@ public class NameManager {
                 continue;
             }
 
-            return new SequenceName(source, seq, this.getUUIDFromName(name), name);
+            try {
+                return new SequenceName(source, seq, this.getUUIDFromName(name), name);
+            } catch (FakeplayerProfileRepository.MalformedProfileException malformed) {
+                // Keep this sequence quarantined for the current process and
+                // continue to the next regular name. Re-adding it to NameSource
+                // would make every later spawn retry the same corrupted row.
+                log.warning("Skipping corrupted fake-player profile name '" + name + "': " + malformed.getMessage());
+            }
         }
 
         String name;
@@ -342,14 +358,36 @@ public class NameManager {
         }
 
         return this.getUUIDFromNameAsync(name)
-                .thenApply(uuid -> new SequenceName(context.source(), sequence, uuid, name))
-                .whenComplete((ignored, throwable) -> {
-                    if (throwable != null) {
-                        // UUID persistence can fail independently of sequence
-                        // allocation; do not permanently consume the slot.
-                        this.unregister(context.source(), sequence);
+                .<CompletableFuture<SequenceName>>handle((uuid, throwable) -> {
+                    if (throwable == null) {
+                        return CompletableFuture.completedFuture(
+                                new SequenceName(context.source(), sequence, uuid, name)
+                        );
                     }
-                });
+
+                    var failure = unwrapCompletion(throwable);
+                    if (failure instanceof FakeplayerProfileRepository.MalformedProfileException malformed) {
+                        // The bad row is tied to this generated name, not to the
+                        // creator as a whole. Quarantine the sequence and keep
+                        // searching instead of retrying the same name forever.
+                        log.warning("Skipping corrupted fake-player profile name '" + name + "': " + malformed.getMessage());
+                        return this.nextRegularNameAsync(context, attempt + 1);
+                    }
+
+                    // Transient persistence/scheduler failures must not consume
+                    // a valid sequence slot.
+                    this.unregister(context.source(), sequence);
+                    return CompletableFuture.failedFuture(failure);
+                })
+                .thenCompose(future -> future);
+    }
+
+    private static @NotNull Throwable unwrapCompletion(@NotNull Throwable throwable) {
+        var current = throwable;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 
     private @NotNull CompletableFuture<SequenceName> nextRandomNameAsync(
@@ -394,7 +432,7 @@ public class NameManager {
     }
 
     private @NotNull CompletableFuture<UUID> resolveUUIDFromNameAsync(@NotNull String name) {
-        return CompletableFuture
+        return asyncExecutor
                 .supplyAsync(() -> profileRepository.selectUUIDByName(name))
                 .thenCompose(existing -> {
                     if (existing != null) {
@@ -402,7 +440,7 @@ public class NameManager {
                     }
 
                     var legacyUUID = UUID.nameUUIDFromBytes((serverId + ":" + name).getBytes(StandardCharsets.UTF_8));
-                    return CompletableFuture
+                    return asyncExecutor
                             .supplyAsync(() -> {
                                 if (!legacyUsedIdRepository.removeIfPresent(legacyUUID)) {
                                     return null;
@@ -429,7 +467,7 @@ public class NameManager {
         }
 
         var uuid = UUID.randomUUID();
-        return CompletableFuture
+        return asyncExecutor
                 .supplyAsync(() -> legacyUsedIdRepository.contains(uuid) || profileRepository.existsByUUID(uuid))
                 .thenCompose(used -> {
                     if (used) {
@@ -440,7 +478,7 @@ public class NameManager {
                         if (playedBefore) {
                             return this.findRandomUUIDAsync(name, attempt + 1);
                         }
-                        return CompletableFuture.supplyAsync(() -> {
+                        return asyncExecutor.supplyAsync(() -> {
                             profileRepository.insert(name, uuid);
                             return uuid;
                         });

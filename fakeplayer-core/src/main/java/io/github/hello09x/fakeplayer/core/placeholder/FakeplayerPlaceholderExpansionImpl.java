@@ -44,7 +44,7 @@ public class FakeplayerPlaceholderExpansionImpl extends PlaceholderExpansion imp
 
     @Override
     public @NotNull String getVersion() {
-        return "1.0";
+        return Main.getInstance().getPluginMeta().getVersion();
     }
 
     @Override

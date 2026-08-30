@@ -11,6 +11,7 @@ import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
+import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
@@ -91,7 +92,12 @@ public abstract class AbstractInvseeManager implements InvseeManager {
     /**
      * Folia does not allow a viewer-region inventory view to directly expose a
      * PlayerInventory owned by another region. Use a viewer-owned mirror and
-     * synchronize snapshots back to the fake player on its entity scheduler.
+     * keep the view read-only because the fake player may continue changing
+     * its inventory while the viewer is in another region.
+     *
+     * <p>The mirror is deliberately read-only. A snapshot cannot safely be
+     * written back after the fake player has continued consuming, picking up,
+     * or otherwise changing its inventory on another region thread.</p>
      */
     private boolean openCrossRegion(@NotNull Player viewer, @NotNull Player whom) {
         Tasks.call(Main.getInstance(), whom, () -> copyContents(whom))
@@ -108,13 +114,10 @@ public abstract class AbstractInvseeManager implements InvseeManager {
                         return;
                     }
 
-                    var previous = crossRegionSessions.put(
+                    crossRegionSessions.put(
                             viewer.getUniqueId(),
-                            new CrossRegionSession(whom.getUniqueId(), inventory)
+                            new CrossRegionSession(inventory)
                     );
-                    if (previous != null) {
-                        syncToFake(previous);
-                    }
 
                     var view = viewer.openInventory(inventory);
                     if (view == null) {
@@ -143,19 +146,6 @@ public abstract class AbstractInvseeManager implements InvseeManager {
         return Arrays.stream(inventory.getContents())
                 .map(item -> item == null ? null : item.clone())
                 .toArray(ItemStack[]::new);
-    }
-
-    private void syncToFake(@NotNull CrossRegionSession session) {
-        var fake = fakeplayerList.getByUUID(session.fakePlayerId());
-        if (fake == null) {
-            return;
-        }
-        var contents = copyContents(session.inventory());
-        Tasks.run(Main.getInstance(), fake.getPlayer(), () -> {
-            if (fakeplayerList.getByUUID(session.fakePlayerId()) == fake) {
-                fake.getPlayer().getInventory().setContents(contents);
-            }
-        });
     }
 
     private @Nullable CrossRegionSession sessionFor(@NotNull Player viewer) {
@@ -195,35 +185,32 @@ public abstract class AbstractInvseeManager implements InvseeManager {
         }
     }
 
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
-    public void syncCrossRegionClick(@NotNull InventoryClickEvent event) {
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void preventCrossRegionClick(@NotNull InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player viewer)) {
             return;
         }
         var session = sessionFor(viewer, event.getView());
-        if (session != null) {
-            scheduleSync(viewer, session);
+        var topSize = event.getView().getTopInventory().getSize();
+        var affectsTop = event.getRawSlot() >= 0 && event.getRawSlot() < topSize
+                || event.isShiftClick()
+                || event.getClick() == ClickType.DOUBLE_CLICK;
+        if (session != null && affectsTop) {
+            event.setCancelled(true);
         }
     }
 
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
-    public void syncCrossRegionDrag(@NotNull InventoryDragEvent event) {
-        if (!(event.getWhoClicked() instanceof Player viewer)
-                || event.getRawSlots().stream().noneMatch(slot -> slot < event.getView().getTopInventory().getSize())) {
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void preventCrossRegionDrag(@NotNull InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player viewer)) {
             return;
         }
         var session = sessionFor(viewer, event.getView());
-        if (session != null) {
-            scheduleSync(viewer, session);
+        var topSize = event.getView().getTopInventory().getSize();
+        if (session != null && event.getRawSlots().stream()
+                .anyMatch(slot -> slot >= 0 && slot < topSize)) {
+            event.setCancelled(true);
         }
-    }
-
-    private void scheduleSync(@NotNull Player viewer, @NotNull CrossRegionSession session) {
-        Tasks.runDelayed(Main.getInstance(), viewer, () -> {
-            if (crossRegionSessions.get(viewer.getUniqueId()) == session) {
-                syncToFake(session);
-            }
-        }, 1);
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
@@ -236,19 +223,14 @@ public abstract class AbstractInvseeManager implements InvseeManager {
             return;
         }
         crossRegionSessions.remove(viewer.getUniqueId(), session);
-        syncToFake(session);
     }
 
     @EventHandler
     public void quitCrossRegion(@NotNull PlayerQuitEvent event) {
-        var session = crossRegionSessions.remove(event.getPlayer().getUniqueId());
-        if (session != null) {
-            syncToFake(session);
-        }
+        crossRegionSessions.remove(event.getPlayer().getUniqueId());
     }
 
     private record CrossRegionSession(
-            @NotNull UUID fakePlayerId,
             @NotNull Inventory inventory
     ) {
     }

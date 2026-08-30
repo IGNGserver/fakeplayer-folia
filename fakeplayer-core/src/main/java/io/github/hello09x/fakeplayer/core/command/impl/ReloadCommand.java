@@ -27,6 +27,7 @@ public class ReloadCommand extends AbstractCommand {
     public void reload(@NotNull CommandSender sender, @NotNull CommandArguments args) {
         config.reload();
         sender.sendMessage(translatable("fakeplayer.command.generic.success", GRAY));
+        sender.sendMessage(translatable("fakeplayer.command.reload.invsee-restart", GRAY));
         if (config.isConfigFileOutOfDate()) {
             sender.sendMessage(translatable("fakeplayer.configuration.out-of-date", GRAY));
         }

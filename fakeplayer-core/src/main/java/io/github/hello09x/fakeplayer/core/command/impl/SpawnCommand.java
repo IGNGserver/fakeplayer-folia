@@ -69,41 +69,41 @@ public class SpawnCommand extends AbstractCommand {
 
         var removedAt = Optional.ofNullable(config.getLifespan()).map(lifespan -> LocalDateTime.now().plus(lifespan)).orElse(null);
         manager.spawnAsync(sender, name, spawnpoint, Optional.ofNullable(config.getLifespan()).map(Duration::toMillis).orElse(FakeplayerTicker.NON_REMOVE_AT))
-               .thenAcceptAsync(player -> {
-                   if (player == null) {
-                       return;
-                   }
-                   Component message;
-                   if (removedAt == null) {
-                       message = translatable(
-                               "fakeplayer.command.spawn.success.without-lifespan",
-                               text(player.getName(), WHITE),
-                               text(toLocationString(spawnpoint), WHITE)
-                       ).color(GRAY);
-                   } else {
-                       message = translatable(
-                               "fakeplayer.command.spawn.success.with-lifespan",
-                               text(player.getName(), WHITE),
-                               text(toLocationString(spawnpoint), WHITE),
-                               text(REMOVE_AT_FORMATTER.format(removedAt))
-                       ).color(GRAY);
-                   }
-runForSender(sender, () -> {
+                .thenAccept(player -> {
+                    if (player == null) {
+                        return;
+                    }
+                    runForSender(sender, () -> {
+                        Component message;
+                        if (removedAt == null) {
+                            message = translatable(
+                                    "fakeplayer.command.spawn.success.without-lifespan",
+                                    text(player.getName(), WHITE),
+                                    text(toLocationString(spawnpoint), WHITE)
+                            ).color(GRAY);
+                        } else {
+                            message = translatable(
+                                    "fakeplayer.command.spawn.success.with-lifespan",
+                                    text(player.getName(), WHITE),
+                                    text(toLocationString(spawnpoint), WHITE),
+                                    text(REMOVE_AT_FORMATTER.format(removedAt))
+                            ).color(GRAY);
+                        }
                         sender.sendMessage(message);
                         if (sender instanceof Player p && manager.countByCreator(sender) == 1) {
                             // 有些命令在有假人的时候才会显示, 因此需要强制刷新一下
                             p.updateCommands();
                         }
                     });
-               }).exceptionally(e -> {
-if (Throwables.getRootCause(e) instanceof CommandException ce) {
+                }).exceptionally(e -> {
+                    if (Throwables.getRootCause(e) instanceof CommandException ce) {
                         runForSender(sender, () -> sender.sendMessage(ce.component()));
                     } else {
                         runForSender(sender, () -> sender.sendMessage(translatable("fakeplayer.command.spawn.error.unknown", RED)));
                         log.severe(Throwables.getStackTraceAsString(e));
                     }
-                   return null;
-               });
+                    return null;
+                });
     }
 
 

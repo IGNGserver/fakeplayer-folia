@@ -10,6 +10,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 @Singleton
@@ -45,7 +46,10 @@ public class UserConfigRepository {
 
     public @NotNull List<UserConfig> selectByPlayerId(@NotNull UUID playerId) {
         var sql = "select * from user_config where player_id = ?";
-        return jdbc.query(sql, UserConfigRowMapper.instance, playerId.toString());
+        return jdbc.query(sql, UserConfigRowMapper.instance, playerId.toString())
+                   .stream()
+                   .filter(Objects::nonNull)
+                   .toList();
     }
 
     protected void initTables() {

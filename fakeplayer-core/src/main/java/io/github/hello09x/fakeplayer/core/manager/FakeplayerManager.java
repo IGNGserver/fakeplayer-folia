@@ -13,6 +13,7 @@ import io.github.hello09x.fakeplayer.core.config.FakeplayerConfig;
 import io.github.hello09x.fakeplayer.core.constant.MetadataKeys;
 import io.github.hello09x.fakeplayer.core.entity.Fakeplayer;
 import io.github.hello09x.fakeplayer.core.entity.SpawnOption;
+import io.github.hello09x.fakeplayer.core.lifecycle.LifecycleCommandCoordinator;
 import io.github.hello09x.fakeplayer.core.manager.feature.FakeplayerFeatureManager;
 import io.github.hello09x.fakeplayer.core.manager.naming.NameManager;
 import io.github.hello09x.fakeplayer.core.repository.model.Feature;
@@ -32,6 +33,7 @@ import org.jetbrains.annotations.Nullable;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -56,21 +58,38 @@ public class FakeplayerManager {
     private final FakeplayerFeatureManager featureManager;
     private final NMSBridge nms;
     private final FakeplayerConfig config;
+    private final LifecycleCommandCoordinator lifecycleCoordinator;
     private final Tasks.Task lagMonitor;
     private final SpawnQuota spawnQuota = new SpawnQuota();
+    private volatile boolean shuttingDown;
+    private volatile boolean shutdownFinalized;
     /**
      * Console commands are executed on Folia's global region. Keep a tail per
      * fake player so post-spawn/post-quit hooks cannot overtake one another.
      */
-    private final ConcurrentHashMap<UUID, CompletableFuture<Void>> commandChains = new ConcurrentHashMap<>();
+    // A persistent fake-player UUID can be reused after a quit. Key the
+    // lifecycle chain by the concrete spawn instance so a delayed after-quit
+    // hook from an older instance cannot clear or precede a newer one.
+    private final ConcurrentHashMap<Fakeplayer, CompletableFuture<Void>> commandChains = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Fakeplayer, LifecycleCommandCoordinator.Handle> lifecycleTransactions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Fakeplayer, Tasks.Task> afterSpawnTasks = new ConcurrentHashMap<>();
+    private final Set<Fakeplayer> quittingFakeplayers = ConcurrentHashMap.newKeySet();
 
     @Inject
-    public FakeplayerManager(NameManager nameManager, FakeplayerList playerList, FakeplayerFeatureManager featureManager, NMSBridge nms, FakeplayerConfig config) {
+    public FakeplayerManager(
+            NameManager nameManager,
+            FakeplayerList playerList,
+            FakeplayerFeatureManager featureManager,
+            NMSBridge nms,
+            FakeplayerConfig config,
+            LifecycleCommandCoordinator lifecycleCoordinator
+    ) {
         this.nameManager = nameManager;
         this.playerList = playerList;
         this.featureManager = featureManager;
         this.nms = nms;
         this.config = config;
+        this.lifecycleCoordinator = lifecycleCoordinator;
 
         // Bukkit#getTPS is global server state. On Folia it must be read from the global
         // region; an ordinary ScheduledExecutorService is neither a valid region context nor
@@ -101,6 +120,9 @@ public class FakeplayerManager {
             @NotNull Location spawnAt,
             long lifespan
     ) {
+        if (this.shuttingDown) {
+            return CompletableFuture.failedFuture(new IllegalStateException("Fakeplayer is shutting down"));
+        }
         var spawnLocation = spawnAt.clone();
         return this.reserveSpawnAsync(creator).thenCompose(reservation -> {
             var sequenceRef = new AtomicReference<io.github.hello09x.fakeplayer.core.manager.naming.SequenceName>();
@@ -125,45 +147,83 @@ public class FakeplayerManager {
                     })
                     .thenCompose(fp -> {
                         fakeplayerRef.set(fp);
-                        try {
-                            if (!this.spawnQuota.commit(reservation.reservation(), () -> this.playerList.add(fp))) {
-                                throw new IllegalStateException("Fake-player registry rejected duplicate name or UUID: " + fp.getName());
-                            }
-                        } catch (Throwable failure) {
-                            this.rollbackSpawn(fp, failure);
-                            return CompletableFuture.failedFuture(failure);
-                        }
-                        return this.dispatchCommandsEarly(fp, this.config.getPreSpawnCommands())
-                                .thenCompose(ignored -> {
-                                    var configsFuture = featureManager.getFeaturesAsync(creator);
-                                    return configsFuture.thenApply(configs -> new SpawnOption(
-                                            spawnLocation,
-                                            configs.get(Feature.invulnerable).asBoolean(),
-                                            configs.get(Feature.collidable).asBoolean(),
-                                            configs.get(Feature.look_at_entity).asBoolean(),
-                                            configs.get(Feature.pickup_items).asBoolean(),
-                                            configs.get(Feature.skin).asBoolean(),
-                                            configs.get(Feature.replenish).asBoolean(),
-                                            configs.get(Feature.autofish).asBoolean(),
-                                            configs.get(Feature.wolverine).asBoolean()
-                                    ));
+                        var handleRef = new AtomicReference<LifecycleCommandCoordinator.Handle>();
+                        return this.lifecycleCoordinator.prepareAsync(
+                                        fp,
+                                        this.config.getPreSpawnCommands(),
+                                        this.config.getPreSpawnRollbackCommands(),
+                                        this.config.getPostQuitCommands(),
+                                        this.config.getAfterQuitCommands()
+                                )
+                                .thenCompose(handle -> {
+                                    handleRef.set(handle);
+                                    this.lifecycleTransactions.put(fp, handle);
+                                    return this.lifecycleCoordinator.runPreSpawnAsync(
+                                                    handle,
+                                                    fp,
+                                                    this.config.getPreSpawnCommands()
+                                            )
+                                            .thenCompose(ignored -> {
+                                                if (this.shuttingDown) {
+                                                    throw new IllegalStateException("Fakeplayer is shutting down");
+                                                }
+                                                if (!this.spawnQuota.commit(reservation.reservation(), () -> this.playerList.add(fp))) {
+                                                    throw new IllegalStateException("Fake-player registry rejected duplicate name or UUID: " + fp.getName());
+                                                }
+                                                return featureManager.getFeaturesAsync(creator).thenApply(configs -> new SpawnOption(
+                                                        spawnLocation,
+                                                        configs.get(Feature.invulnerable).asBoolean(),
+                                                        configs.get(Feature.collidable).asBoolean(),
+                                                        configs.get(Feature.look_at_entity).asBoolean(),
+                                                        configs.get(Feature.pickup_items).asBoolean(),
+                                                        configs.get(Feature.skin).asBoolean(),
+                                                        configs.get(Feature.replenish).asBoolean(),
+                                                        configs.get(Feature.autofish).asBoolean(),
+                                                        configs.get(Feature.wolverine).asBoolean()
+                                                ));
+                                            })
+                                            .thenCompose(fp::spawnAsync)
+                                            // The durable transaction becomes ACTIVE only
+                                            // after every fallible spawn/login/teleport stage
+                                            // has completed. PlayerJoinEvent no longer owns
+                                            // external lifecycle command dispatch.
+                                            .thenCompose(ignored -> this.lifecycleCoordinator.activateAsync(handle))
+                                            .thenApply(ignored -> {
+                                                this.runCommittedSpawnHooks(fp);
+                                                return fp.getPlayer();
+                                            });
                                 })
-                                .thenComposeAsync(fp::spawnAsync)
-                                .thenApply(ignored -> fp.getPlayer())
-                                .whenComplete((ignored, throwable) -> {
-                                    if (throwable != null) {
-                                        this.rollbackSpawn(fp, throwable);
+                                .<CompletableFuture<Player>>handle((player, throwable) -> {
+                                    if (throwable == null) {
+                                        return CompletableFuture.completedFuture(player);
                                     }
-                                });
+                                    var failure = LifecycleCommandCoordinator.unwrap(throwable);
+                                    var handle = handleRef.get();
+                                    var compensation = handle == null
+                                            ? CompletableFuture.<Void>completedFuture(null)
+                                            : this.lifecycleCoordinator.rollbackAsync(handle);
+                                    return compensation.handle((ignored, compensationFailure) -> {
+                                        this.lifecycleTransactions.remove(fp);
+                                        if (compensationFailure != null) {
+                                            failure.addSuppressed(LifecycleCommandCoordinator.unwrap(compensationFailure));
+                                        }
+                                        this.rollbackSpawn(fp, failure);
+                                        throw new CompletionException(failure);
+                                    });
+                                })
+                                .thenCompose(future -> future);
                     })
                     .whenComplete((ignored, throwable) -> {
-                        if (throwable != null && fakeplayerRef.get() == null) {
-                            var sequence = sequenceRef.get();
-                            if (sequence != null) {
-                                this.nameManager.unregister(sequence);
+                        try {
+                            if (throwable != null && fakeplayerRef.get() == null) {
+                                var sequence = sequenceRef.get();
+                                if (sequence != null) {
+                                    this.nameManager.unregister(sequence);
+                                }
                             }
+                        } finally {
+                            reservation.reservation().close();
                         }
-                        reservation.reservation().close();
                     });
         });
     }
@@ -351,8 +411,8 @@ public class FakeplayerManager {
         if (fakeplayer == null) {
             return;
         }
-        this.nameManager.unregister(fakeplayer.getSequenceName());
         try {
+            this.nameManager.unregister(fakeplayer.getSequenceName());
             if (config.isDropInventoryOnQuiting()) {
                 this.nms.createAction(
                         fakeplayer.getPlayer(),
@@ -361,9 +421,8 @@ public class FakeplayerManager {
                 ).tick();
             }
         } finally {
-            // PlayerQuitEvent can be followed by a retired entity scheduler on
-            // Folia. Release the synthetic network even when inventory cleanup
-            // is rejected by another plugin.
+            // PlayerQuitEvent can be followed by a retired Folia entity scheduler on
+            // any exception in name or inventory cleanup. Always release the network.
             fakeplayer.close();
         }
     }
@@ -530,54 +589,88 @@ public class FakeplayerManager {
         }
     }
 
-    public @NotNull CompletableFuture<Void> dispatchCommandsEarly(@NotNull Fakeplayer fp, @NotNull List<String> commands) {
-        if (commands.isEmpty()) {
+    /**
+     * PlayerJoinEvent is emitted inside the NMS login routine, before the
+     * region-aware teleport future has necessarily succeeded. Run external
+     * post-spawn hooks only after the durable spawn transaction is ACTIVE.
+     */
+    private void runCommittedSpawnHooks(@NotNull Fakeplayer fakeplayer) {
+        this.dispatchCommandsAsync(fakeplayer, config.getPostSpawnCommands())
+                .exceptionally(throwable -> {
+                    log.warning("Failed to run post-spawn commands for " + fakeplayer.getName() + ": " + throwable);
+                    return null;
+                });
+
+        try {
+            var task = Tasks.runDelayed(Main.getInstance(), fakeplayer.getPlayer(), () -> {
+                this.afterSpawnTasks.remove(fakeplayer);
+                var player = fakeplayer.getPlayer();
+                if (!this.shuttingDown && player.isOnline() && this.getRecord(player) == fakeplayer) {
+                    this.dispatchCommandsAsync(fakeplayer, config.getAfterSpawnCommands())
+                            .thenRun(() -> {
+                                // Quit can begin after the outer check but
+                                // before this continuation is appended.
+                                if (!this.quittingFakeplayers.contains(fakeplayer)
+                                        && !this.shuttingDown) {
+                                    // issueCommands performs its live-record
+                                    // check on the entity thread on Folia.
+                                    this.issueCommands(player, config.getSelfCommands());
+                                }
+                            })
+                            .exceptionally(throwable -> {
+                                log.warning("Failed to run after-spawn commands for "
+                                        + fakeplayer.getName() + ": " + throwable);
+                                return null;
+                            });
+                }
+            }, 20);
+            var previous = this.afterSpawnTasks.put(fakeplayer, task);
+            if (previous != null) {
+                previous.cancel();
+            }
+        } catch (Throwable schedulingFailure) {
+            log.warning("Failed to schedule after-spawn commands for " + fakeplayer.getName()
+                    + ": " + schedulingFailure);
+        }
+    }
+
+    /** Start the durable exit finalizer while PlayerQuitEvent still owns the record. */
+    public @NotNull CompletableFuture<Void> startQuitLifecycle(@NotNull Fakeplayer fakeplayer) {
+        // Publish the state before cancelling the delayed hook. If that hook is
+        // already running, dispatchCommandsAsync checks this state again while
+        // atomically appending to the same per-instance command chain.
+        this.quittingFakeplayers.add(fakeplayer);
+        var task = this.afterSpawnTasks.remove(fakeplayer);
+        if (task != null) {
+            task.cancel();
+        }
+        var handle = this.lifecycleTransactions.get(fakeplayer);
+        return this.commandChains.compute(fakeplayer, (key, tail) -> {
+            var ready = tail == null
+                    ? CompletableFuture.<Void>completedFuture(null)
+                    : tail.handle((ignored, throwable) -> (Void) null);
+            return handle == null
+                    ? ready
+                    : ready.thenCompose(ignored -> this.lifecycleCoordinator.runPostQuitAsync(handle));
+        });
+    }
+
+    /** Retry post-quit if necessary, run after-quit, then commit journal deletion. */
+    public @NotNull CompletableFuture<Void> finishQuitLifecycle(@NotNull Fakeplayer fakeplayer) {
+        var handle = this.lifecycleTransactions.get(fakeplayer);
+        if (handle == null) {
+            this.commandChains.remove(fakeplayer);
+            this.quittingFakeplayers.remove(fakeplayer);
             return CompletableFuture.completedFuture(null);
         }
-
-        var p = fp.getName();
-        var u = fp.getUUID().toString();
-        var c = fp.getCreator().getName();
-        var formatted = Commands.formatCommands(commands, "%p", p, "%u", u, "%c", c);
-        return this.dispatchConsoleCommands(formatted, p);
-    }
-
-    /**
-     * 以控制台身份对玩家执行命令
-     *
-     * @param player   假人
-     * @param commands 命令
-     */
-    public void dispatchCommands(@NotNull Player player, @NotNull List<String> commands) {
-        if (commands.isEmpty()) {
-            return;
-        }
-
-        // Use the registry object rather than the Bukkit entity. This keeps
-        // post-quit command hooks working after Folia retires the entity's
-        // scheduler, and all values needed for formatting are immutable.
-        var fakeplayer = this.playerList.getByUUID(player.getUniqueId());
-        if (fakeplayer == null) {
-            return;
-        }
-
-        this.dispatchCommands(fakeplayer, commands);
-    }
-
-    /**
-     * Dispatch commands using the immutable fake-player record. This overload
-     * remains usable after PlayerQuitEvent has removed the record from the
-     * live-player index.
-     */
-    public void dispatchCommands(@NotNull Fakeplayer fakeplayer, @NotNull List<String> commands) {
-        if (commands.isEmpty()) {
-            return;
-        }
-
-        this.dispatchCommandsAsync(fakeplayer, commands).exceptionally(throwable -> {
-            log.warning("Failed to dispatch fake-player lifecycle commands for " + fakeplayer.getName() + ": " + throwable);
-            return null;
-        });
+        return this.lifecycleCoordinator.finishQuitAsync(handle)
+                .whenComplete((ignored, throwable) -> {
+                    if (throwable == null) {
+                        this.lifecycleTransactions.remove(fakeplayer, handle);
+                        this.commandChains.remove(fakeplayer);
+                        this.quittingFakeplayers.remove(fakeplayer);
+                    }
+                });
     }
 
     /**
@@ -589,7 +682,10 @@ public class FakeplayerManager {
             @NotNull Fakeplayer fakeplayer,
             @NotNull List<String> commands
     ) {
-        var previous = this.commandChains.get(fakeplayer.getUUID());
+        if (this.shuttingDown) {
+            return CompletableFuture.completedFuture(null);
+        }
+        var previous = this.commandChains.get(fakeplayer);
         if (commands.isEmpty()) {
             return previous == null ? CompletableFuture.completedFuture(null) : previous.handle((ignored, throwable) -> null);
         }
@@ -597,40 +693,55 @@ public class FakeplayerManager {
         var p = fakeplayer.getName();
         var u = fakeplayer.getUUID().toString();
         var c = fakeplayer.getCreator().getName();
-        var formatted = Commands.formatCommands(List.copyOf(commands), "%p", p, "%u", u, "%c", c);
-        return this.commandChains.compute(fakeplayer.getUUID(), (uuid, tail) -> {
+        final List<String> formatted;
+        try {
+            formatted = Commands.formatCommands(List.copyOf(commands), "%p", p, "%u", u, "%c", c);
+        } catch (Throwable failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
+        return this.commandChains.compute(fakeplayer, (key, tail) -> {
             var ready = tail == null
                     ? CompletableFuture.<Void>completedFuture(null)
-                    : tail.handle((ignored, throwable) -> null);
-            return ready.thenCompose(ignored -> this.dispatchConsoleCommands(formatted, p));
+                    : tail.handle((ignoredTail, throwable) -> (Void) null);
+            if (this.quittingFakeplayers.contains(key)) {
+                // No spawn hook may be appended behind the durable quit
+                // finalizer. Returning the normalized existing tail also
+                // contains an earlier hook failure for callers.
+                return ready;
+            }
+            return ready.thenCompose(ignoredReady -> this.dispatchConsoleCommands(formatted, p));
         });
-    }
-
-    /** Remove a completed lifecycle command chain after the after-quit hook. */
-    public void clearCommandChain(@NotNull UUID uuid) {
-        this.commandChains.remove(uuid);
     }
 
     private @NotNull CompletableFuture<Void> dispatchConsoleCommands(@NotNull List<String> commands, @NotNull String playerName) {
         Runnable dispatch = () -> {
+            if (this.shuttingDown) {
+                throw new IllegalStateException("Fakeplayer is shutting down");
+            }
             var server = Bukkit.getServer();
             var sender = Bukkit.getConsoleSender();
+            IllegalStateException unhandled = null;
             for (var cmd : commands) {
                 if (!server.dispatchCommand(sender, cmd)) {
-                    log.warning("Failed to execute command for %s: ".formatted(playerName) + cmd);
+                    log.warning("Failed to execute command for %s: %s".formatted(playerName, cmd));
+                    if (unhandled == null) {
+                        unhandled = new IllegalStateException("Command was not handled for %s: %s".formatted(playerName, cmd));
+                    }
                 } else {
                     log.info("Dispatched command: " + cmd);
                 }
             }
+            if (unhandled != null) {
+                throw unhandled;
+            }
         };
-        if (Tasks.isFolia()) {
-            return Tasks.callGlobal(Main.getInstance(), () -> {
-                dispatch.run();
-                return null;
-            });
-        }
-        dispatch.run();
-        return CompletableFuture.completedFuture(null);
+        // CompletableFuture continuations can arrive here on the plugin IO
+        // executor even on Paper. Always route console dispatch through the
+        // server's main/global scheduler.
+        return Tasks.callGlobal(Main.getInstance(), () -> {
+            dispatch.run();
+            return null;
+        });
     }
 
     /**
@@ -670,40 +781,113 @@ public class FakeplayerManager {
         return new CommandException(translatable(key));
     }
 
-    public void onDisable() {
-        Exceptions.suppress(Main.getInstance(), () -> this.removeAll("Plugin disabled"));
+    /** Stop accepting work before the owned executors are interrupted. */
+    public void beginShutdown() {
+        if (this.shuttingDown) {
+            return;
+        }
+        this.shuttingDown = true;
+        this.lifecycleCoordinator.beginShutdown();
         Exceptions.suppress(Main.getInstance(), this.lagMonitor::cancel);
+        this.afterSpawnTasks.values().forEach(Tasks.Task::cancel);
+        this.afterSpawnTasks.clear();
+    }
+
+    /**
+     * Finalize durable external state after async workers have stopped, then
+     * release in-memory/native resources. Recovery runs synchronously because
+     * schedulers cannot be relied upon once plugin disable has begun.
+     */
+    public void onDisable() {
+        this.beginShutdown();
+        if (this.shutdownFinalized) {
+            return;
+        }
+        this.shutdownFinalized = true;
+        try {
+            this.lifecycleCoordinator.recoverPendingSynchronously();
+        } catch (Throwable recoveryFailure) {
+            // The journal is intentionally retained. A later enable refuses
+            // unsafe startup until every idempotent finalizer succeeds.
+            log.severe("Lifecycle finalization remains pending and will be retried on next startup: "
+                    + recoveryFailure);
+        }
+
+        var reason = text(REMOVAL_REASON_PREFIX + "Plugin disabled");
+        for (var fakeplayer : this.playerList.getAll()) {
+            if (!this.playerList.remove(fakeplayer)) {
+                continue;
+            }
+            try {
+                this.nameManager.unregister(fakeplayer.getSequenceName());
+            } catch (Throwable unregisterFailure) {
+                log.warning("Failed to release fake-player name " + fakeplayer.getName() + ": " + unregisterFailure);
+            }
+            this.commandChains.remove(fakeplayer);
+            try {
+                var player = fakeplayer.getPlayer();
+                // onDisable itself runs on the server lifecycle thread and no
+                // new plugin task is guaranteed to execute. Attempt the native
+                // disconnect immediately; the server's own stop path remains
+                // the final owner if a Folia runtime rejects entity mutation.
+                player.kick(reason);
+            } catch (Throwable kickFailure) {
+                log.warning("Failed to remove fake player " + fakeplayer.getName() + ": " + kickFailure);
+            } finally {
+                try {
+                    // Kick first so a just-closed synthetic channel cannot
+                    // make Player#kick a no-op. Close still releases all
+                    // plugin-owned network/action state below.
+                    fakeplayer.close();
+                } catch (Throwable closeFailure) {
+                    log.warning("Failed to close fake-player resources for " + fakeplayer.getName() + ": " + closeFailure);
+                }
+            }
+        }
+        this.lifecycleTransactions.clear();
         this.commandChains.clear();
+        this.quittingFakeplayers.clear();
         this.spawnQuota.clear();
     }
 
     private void rollbackSpawn(@NotNull Fakeplayer fakeplayer, @NotNull Throwable throwable) {
         this.playerList.remove(fakeplayer);
-        this.nameManager.unregister(fakeplayer.getSequenceName());
-        this.commandChains.remove(fakeplayer.getUUID());
-
+        this.lifecycleTransactions.remove(fakeplayer);
+        this.commandChains.remove(fakeplayer);
+        this.quittingFakeplayers.remove(fakeplayer);
         try {
-            fakeplayer.close();
-        } catch (Throwable closeFailure) {
-            log.warning("Failed to close fake-player resources for " + fakeplayer.getName() + ": " + closeFailure);
+            this.nameManager.unregister(fakeplayer.getSequenceName());
+        } catch (Throwable unregisterFailure) {
+            log.warning("Failed to release fake-player name " + fakeplayer.getName() + ": " + unregisterFailure);
         }
 
         var player = fakeplayer.getPlayer();
         var reason = text("[fakeplayer] spawn failed");
         try {
-            if (Tasks.isFolia()) {
-                Tasks.run(Main.getInstance(), player, () -> {
+            // The failure continuation can be running on an IO executor. Use
+            // the entity/main scheduler on every platform, kick before
+            // closing the synthetic channel, and handle a retired Folia
+            // scheduler by releasing plugin-owned state in the completion.
+            Tasks.call(Main.getInstance(), player, () -> {
+                try {
                     // Kick even when the login pipeline failed halfway
                     // through and Bukkit has not published isOnline() yet;
                     // CraftPlayer#kick is also the cleanup path for a
                     // partially inserted PlayerList entry.
                     player.kick(reason);
-                });
-            } else {
-                player.kick(reason);
-            }
+                } finally {
+                    fakeplayer.close();
+                }
+                return null;
+            }).exceptionally(cleanupFailure -> {
+                log.warning("Failed to remove failed fake player " + fakeplayer.getName() + ": "
+                        + LifecycleCommandCoordinator.unwrap(cleanupFailure));
+                fakeplayer.close();
+                return null;
+            });
         } catch (Throwable kickFailure) {
             log.warning("Failed to remove failed fake player " + fakeplayer.getName() + ": " + kickFailure);
+            fakeplayer.close();
         }
         log.warning("Failed to spawn fake player " + fakeplayer.getName() + ": " + throwable);
     }

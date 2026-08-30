@@ -2,10 +2,10 @@
 
 This is the **fakeplayer-folia** fork. It is functionally identical to upstream
 [`tanyaofei/minecraft-fakeplayer`](https://github.com/tanyaofei/minecraft-fakeplayer)
-plus Folia support and additional Minecraft versions (1.21.11 and 26.1.2+).
+plus Folia support and additional Minecraft versions (1.21.11 and the tested 26.1.2).
 
 It is a Maven multi-module project. The modern distribution for Folia/Paper
-1.21.11 and 26.x builds from the public Paper API and the reflection-backed
+1.21.11 and 26.1.2 builds from the public Paper API and the reflection-backed
 adapter, so it does not require legacy NMS artifacts. The optional legacy
 distribution still depends on remapped Spigot artifacts that Mojang does not
 allow to be redistributed; those must be produced locally with BuildTools.
@@ -22,8 +22,8 @@ bootstrap script is intended for Unix-like shells and CI.
 
 ## 1. Build the modern distribution
 
-This is the recommended build for Folia/Paper 1.21.11 and 26.x. It builds only
-the API, core, 1.21.11, 26.x and modern shaded-distribution modules, so a clean
+This is the recommended build for Folia/Paper 1.21.11 and 26.1.2. It builds only
+the API, core, 1.21.11, 26.1.2 and modern shaded-distribution modules, so a clean
 checkout does not need a root `lib/` directory or any BuildTools-generated NMS
 artifact:
 
@@ -43,7 +43,7 @@ and CommandAPI as server-side dependencies.
 
 The CI build also checks that both ServiceLoader entries are present in the
 final jar. This prevents a packaging change from silently dropping the
-1.21.11 or 26.x provider.
+1.21.11 or 26.1.2 provider.
 
 ## 2. Install remapped NMS artifacts for the legacy distribution
 
@@ -68,7 +68,7 @@ java -jar BuildTools.jar --rev 1.21.9 --remapped
 java -jar BuildTools.jar --rev 1.21.10 --remapped
 ```
 
-The 1.21.11 and 26.x modules in this fork do not use the old versioned
+The 1.21.11 and 26.1.2 modules in this fork do not use the old versioned
 CraftBukkit/Spigot remapping pipeline. They compile against the public Paper API
 and resolve the Mojang-named runtime classes through the reflection adapter in
 `fakeplayer-v26_1_2`; no BuildTools NMS artifact is required for those two
@@ -80,9 +80,8 @@ This installs `org.spigotmc:spigot:<rev>-R0.1-SNAPSHOT:remapped-mojang`,
 `maps-spigot` csrg into your local `~/.m2` repository.
 
 The module `fakeplayer-v26_1_2` compiles without NMS artifacts and supports the
-26.x runtime family, including 26.1.2. The adapter is intentionally isolated so
-future 26.x patch changes can be handled without reintroducing versioned NMS
-dependencies.
+explicitly verified 26.1.2 runtime. Unknown 26.x patches fail closed until their
+runtime members have been verified and the support matrix is updated.
 
 ## 3. Optional integrations
 
@@ -130,7 +129,7 @@ Legend:
 
 Build verification is not a substitute for a live server smoke test. Before a
 release, test spawn/quit/respawn, all action commands, command permissions,
-configuration persistence, BungeeCord cleanup, inventory synchronization and
+configuration persistence, lifecycle journal recovery, BungeeCord fail-closed behavior, inventory synchronization and
 shutdown on at least one Paper and one Folia server. Cross-region Folia
 inventory viewing uses a viewer-owned mirror; cross-region riding is rejected
 with an explicit error because Folia does not provide a safe atomic passenger

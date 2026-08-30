@@ -9,7 +9,6 @@ import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
 
 import java.net.InetAddress;
-import java.util.Locale;
 
 /** Mojang-named, reflection-backed bridge for the 26.x server family. */
 public class NMSBridgeImpl implements NMSBridge {
@@ -41,9 +40,10 @@ public class NMSBridgeImpl implements NMSBridge {
 
     @Override
     public boolean isSupported() {
-        // 26.x uses the same unversioned Mojang class names across patch
-        // releases, so keep this provider available for newer 26.x releases.
-        return Bukkit.getMinecraftVersion().toLowerCase(Locale.ROOT).startsWith("26.");
+        // Reflection cannot prove that an untested patch preserves every
+        // constructor, field, and protocol method. Fail closed until a patch
+        // has been explicitly verified against this adapter.
+        return "26.1.2".equals(Bukkit.getMinecraftVersion());
     }
 
     @Override
@@ -64,6 +64,31 @@ public class NMSBridgeImpl implements NMSBridge {
         for (var className : required) {
             NmsAccess.classForName(className);
         }
+
+        NmsAccess.requireConstructor("com.mojang.authlib.GameProfile", 2);
+        NmsAccess.requireConstructor("net.minecraft.server.level.ServerPlayer", 4);
+        NmsAccess.requireConstructor("net.minecraft.network.Connection", 1);
+        NmsAccess.requireConstructor("net.minecraft.world.phys.Vec3", 3);
+        NmsAccess.requireMethod("net.minecraft.server.MinecraftServer", "getPlayerList", 0);
+        NmsAccess.requireMethod("net.minecraft.server.MinecraftServer", "registryAccess", 0);
+        NmsAccess.requireMethod("net.minecraft.server.players.PlayerList", "placeNewPlayer", 3);
+        NmsAccess.requireMethod("net.minecraft.server.players.PlayerList", "remove", 1);
+        NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "getBukkitEntity", 0);
+        NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "getInventory", 0);
+        NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "setPos", 3);
+        NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "snapTo", 3);
+        NmsAccess.requireMethod("net.minecraft.network.Connection", "configureSerialization", 4);
+        NmsAccess.requireMethod("net.minecraft.network.Connection", "configurePacketHandler", 1);
+        NmsAccess.requireMethod("net.minecraft.network.Connection", "setupOutboundProtocol", 1);
+        NmsAccess.requireMethod("net.minecraft.network.Connection", "disconnect", 1);
+        NmsAccess.requireMethod("net.minecraft.network.Connection", "handleDisconnection", 0);
+        NmsAccess.requireMethod("net.minecraft.network.RegistryFriendlyByteBuf", "decorator", 1);
+        NmsAccess.requireMethod("net.minecraft.server.network.CommonListenerCookie", "createInitial", 2);
+        NmsAccess.requireMethod("net.minecraft.server.level.ClientInformation", "createDefault", 0);
+        NmsAccess.requireField("net.minecraft.network.protocol.game.GameProtocols", "CLIENTBOUND_TEMPLATE");
+        NmsAccess.requireField("net.minecraft.network.Connection", "channel");
+        NmsAccess.requireField("net.minecraft.network.Connection", "address");
+        NmsAccess.requireField("net.minecraft.server.level.ServerPlayer", "connection");
     }
 
     @Override

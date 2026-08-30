@@ -27,7 +27,7 @@ public class FakeConnection extends Connection {
 
     @Override
     public boolean isConnected() {
-        return true;
+        return this.channel != null && this.channel.isActive();
     }
 
     @Override
@@ -38,6 +38,10 @@ public class FakeConnection extends Connection {
     @Override
     public void send(Packet<?> packet) {
 
+    }
+
+    public void closeChannel() {
+        this.channel.close();
     }
 
 }

@@ -16,6 +16,7 @@ import org.jetbrains.annotations.Unmodifiable;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -34,6 +35,11 @@ public class ActionManager {
 
     /** Player handles are published when the action is installed on its region. */
     private final Map<UUID, Player> players = new ConcurrentHashMap<>();
+    private final Map<String, Long> errorLogAt = new ConcurrentHashMap<>();
+    private final Tasks.Task reapTask;
+    private volatile boolean shuttingDown;
+
+    private static final long ACTION_ERROR_LOG_INTERVAL_MILLIS = 60_000L;
 
     private final NMSBridge bridge;
 
@@ -42,7 +48,7 @@ public class ActionManager {
     public ActionManager(NMSBridge bridge) {
         this.bridge = bridge;
         // 低频清理已下线/失效的 fake player, 避免 EntityScheduler 回收后条目残留
-        Tasks.runAtFixedRateGlobal(Main.getInstance(), this::reap, 0, 100);
+        this.reapTask = Tasks.runAtFixedRateGlobal(Main.getInstance(), this::reap, 0, 100);
     }
 
     public boolean hasActiveAction(
@@ -73,6 +79,9 @@ public class ActionManager {
             @NotNull ActionType action,
             @NotNull ActionSetting setting
     ) {
+        if (this.shuttingDown) {
+            return;
+        }
         if (Tasks.isFolia()) {
             Tasks.run(Main.getInstance(), player, () -> setActionOnEntity(player, action, setting));
             return;
@@ -85,12 +94,49 @@ public class ActionManager {
             @NotNull ActionType action,
             @NotNull ActionSetting setting
     ) {
-        var manager = this.managers.computeIfAbsent(player.getUniqueId(), key -> new ConcurrentHashMap<>());
-        this.players.put(player.getUniqueId(), player);
-        manager.put(action, bridge.createAction(player, action, setting));
-        this.timers.computeIfAbsent(player.getUniqueId(), key -> Tasks.runAtFixedRate(
-                Main.getInstance(), player, () -> this.tickPlayer(player.getUniqueId()), 0, 1)
-        );
+        if (this.shuttingDown) {
+            return;
+        }
+        var uuid = player.getUniqueId();
+        if (setting.equals(ActionSetting.stop())) {
+            var manager = this.managers.get(uuid);
+            if (manager == null) {
+                return;
+            }
+            var previous = manager.remove(action);
+            if (previous != null) {
+                this.stopTicker(action, previous);
+            }
+            if (manager.isEmpty()) {
+                this.softCleanup(uuid);
+            }
+            return;
+        }
+
+        // Construct the replacement before publishing it. If construction
+        // fails, do not publish an empty manager/player entry. Install the
+        // entity timer before swapping state as well, so a retired scheduler
+        // cannot leave a live action with no ticker.
+        var replacement = bridge.createAction(player, action, setting);
+        if (this.shuttingDown) {
+            this.stopTicker(action, replacement);
+            return;
+        }
+        var manager = this.managers.computeIfAbsent(uuid, key -> new ConcurrentHashMap<>());
+        this.players.put(uuid, player);
+        try {
+            this.timers.computeIfAbsent(uuid, key -> Tasks.runAtFixedRate(
+                    Main.getInstance(), player, () -> this.tickPlayer(uuid), 0, 1)
+            );
+        } catch (Throwable schedulingFailure) {
+            this.stopTicker(action, replacement);
+            this.softCleanup(uuid);
+            throw schedulingFailure;
+        }
+        var previous = manager.put(action, replacement);
+        if (previous != null) {
+            this.stopTicker(action, previous);
+        }
     }
 
     public void stop(@NotNull Player player) {
@@ -103,6 +149,9 @@ public class ActionManager {
 
     /** Remove all action state and ticker handles for a retired fake player. */
     public void cleanup(@NotNull Player player) {
+        if (this.shuttingDown) {
+            return;
+        }
         if (Tasks.isFolia()) {
             Tasks.run(Main.getInstance(), player, () -> cleanupOnEntity(player.getUniqueId()));
             return;
@@ -111,19 +160,31 @@ public class ActionManager {
     }
 
     private void stopOnEntity(@NotNull Player player) {
+        if (this.shuttingDown) {
+            return;
+        }
         var manager = this.managers.get(player.getUniqueId());
-        if (manager == null || manager.isEmpty()) {
+        if (manager == null) {
+            return;
+        }
+        if (manager.isEmpty()) {
+            this.softCleanup(player.getUniqueId());
             return;
         }
 
-        for (var entry : manager.entrySet()) {
-            if (!entry.getValue().getSetting().equals(ActionSetting.stop())) {
-                entry.setValue(bridge.createAction(player, entry.getKey(), ActionSetting.stop()));
+        for (var entry : new ArrayList<>(manager.entrySet())) {
+            if (manager.remove(entry.getKey(), entry.getValue())) {
+                this.stopTicker(entry.getKey(), entry.getValue());
             }
         }
+        this.softCleanup(player.getUniqueId());
     }
 
     private void cleanupOnEntity(@NotNull UUID uuid) {
+        if (this.shuttingDown) {
+            this.removeState(uuid);
+            return;
+        }
         var manager = this.managers.get(uuid);
         if (manager != null) {
             this.hardCleanup(uuid, manager);
@@ -136,6 +197,9 @@ public class ActionManager {
      * 为指定 fake player 时刻计算, 由该实体所属的区域线程触发
      */
     private void tickPlayer(@NotNull UUID uuid) {
+        if (this.shuttingDown) {
+            return;
+        }
         var manager = this.managers.get(uuid);
         if (manager == null || manager.isEmpty()) {
             this.softCleanup(uuid);
@@ -154,13 +218,25 @@ public class ActionManager {
 
         var itr = manager.entrySet().iterator();
         while (itr.hasNext()) {
+            if (this.shuttingDown) {
+                return;
+            }
             var entry = itr.next();
+            var action = entry.getKey();
+            var ticker = entry.getValue();
             try {
-                if (entry.getValue().tick()) {
-                    itr.remove();
+                if (ticker.tick()) {
+                    manager.remove(action, ticker);
                 }
             } catch (Throwable e) {
-                log.warning(Throwables.getStackTraceAsString(e));
+                // Isolate a broken action immediately. Keeping it in the map
+                // turns a version/plugin error into an unbounded per-tick
+                // retry and log flood, and can leave state such as an
+                // in-progress block break behind.
+                if (manager.remove(action, ticker)) {
+                    this.stopTicker(action, ticker);
+                }
+                this.logActionFailure(action, e);
             }
         }
         if (manager.isEmpty()) {
@@ -172,6 +248,9 @@ public class ActionManager {
      * 清理已下线/失效的条目, 由全局区域线程周期触发
      */
     private void reap() {
+        if (this.shuttingDown) {
+            return;
+        }
         for (var uuid : this.managers.keySet()) {
             var player = Bukkit.getPlayer(uuid);
             var manager = this.managers.get(uuid);
@@ -213,6 +292,10 @@ public class ActionManager {
      * 硬清理: 玩家已下线/失效, 停止所有动作并强制丢弃
      */
     private void hardCleanup(@NotNull UUID uuid, @NotNull Map<ActionType, ActionTicker> manager) {
+        if (this.shuttingDown) {
+            this.removeState(uuid);
+            return;
+        }
         for (var ticker : manager.values()) {
             try {
                 ticker.stop();
@@ -229,12 +312,60 @@ public class ActionManager {
     }
 
     private void removeState(@NotNull UUID uuid) {
-        this.managers.remove(uuid);
+        var manager = this.managers.remove(uuid);
+        if (manager != null) {
+            // This path is used only when the entity scheduler is already
+            // retired (or during plugin shutdown). ActionTicker.stop() may
+            // call version-specific NMS mutators, so it must not be invoked
+            // from the global reaper or Folia's plugin-disable thread.
+            manager.clear();
+        }
         this.players.remove(uuid);
         var timer = this.timers.remove(uuid);
         if (timer != null) {
             timer.cancel();
         }
+    }
+
+    private void stopTicker(@NotNull ActionType action, @NotNull ActionTicker ticker) {
+        try {
+            ticker.stop();
+        } catch (Throwable failure) {
+            this.logActionFailure(action, failure);
+        }
+    }
+
+    private void logActionFailure(@NotNull ActionType action, @NotNull Throwable failure) {
+        var key = action.name() + ":" + failure.getClass().getName();
+        var now = System.currentTimeMillis();
+        this.errorLogAt.compute(key, (ignored, previous) -> {
+            if (previous == null || now - previous >= ACTION_ERROR_LOG_INTERVAL_MILLIS) {
+                var message = Objects.toString(failure.getMessage(), "").replace('\n', ' ').replace('\r', ' ');
+                if (message.length() > 200) {
+                    message = message.substring(0, 200);
+                }
+                log.log(Level.WARNING, "Isolated failed fake-player action " + action +
+                        " (" + failure.getClass().getSimpleName() +
+                        (message.isBlank() ? "" : ": " + message) + ")", failure);
+                return now;
+            }
+            return previous;
+        });
+    }
+
+    /** Cancel the global reaper and release every remaining action state. */
+    public void onDisable() {
+        this.shuttingDown = true;
+        this.reapTask.cancel();
+        for (var uuid : new ArrayList<>(this.managers.keySet())) {
+            this.removeState(uuid);
+        }
+        for (var timer : this.timers.values()) {
+            timer.cancel();
+        }
+        this.timers.clear();
+        this.players.clear();
+        this.errorLogAt.clear();
     }
 
 }
