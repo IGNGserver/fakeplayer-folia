@@ -19,6 +19,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -32,7 +33,9 @@ import java.util.logging.Logger;
  */
 final class NMSNetworkImpl implements NMSNetwork {
 
-    private static final Logger LOG = Main.getInstance().getLogger();
+    private static final Logger LOG = Main.getInstance() == null
+            ? Logger.getLogger(NMSNetworkImpl.class.getName())
+            : Main.getInstance().getLogger();
 
     private final InetAddress address;
     private final Queue<Object> outbound = new ConcurrentLinkedQueue<>();
@@ -43,6 +46,10 @@ final class NMSNetworkImpl implements NMSNetwork {
     private volatile Player player;
     private volatile NMSServerGamePacketListener listener;
     private volatile Tasks.Task outboundTask;
+    private volatile NMSNetwork.PlacementRollbackState placementRollbackState =
+            NMSNetwork.PlacementRollbackState.NOT_STARTED;
+    /** Native connection/task teardown is owned by exactly one transaction. */
+    private final AtomicBoolean teardownStarted = new AtomicBoolean();
 
     NMSNetworkImpl(@NotNull InetAddress address) {
         this.address = address;
@@ -62,6 +69,12 @@ final class NMSNetworkImpl implements NMSNetwork {
             @NotNull Player player,
             @NotNull Location spawnAt
     ) {
+        var rollbackState = this.placementRollbackState;
+        if (rollbackState != NMSNetwork.PlacementRollbackState.NOT_STARTED) {
+            throw new IllegalStateException(
+                    "Cannot place a fake player after native placement rollback reached " + rollbackState
+            );
+        }
         if (this.listener != null) {
             return this.listener;
         }
@@ -97,7 +110,18 @@ final class NMSNetworkImpl implements NMSNetwork {
             Object playerList = NmsAccess.invoke(serverHandle, "getPlayerList");
             NmsAccess.invoke(playerList, "placeNewPlayer", connection, playerHandle, cookie);
 
-            this.listener = new Listener(NmsAccess.getField(playerHandle, "connection"));
+            // PlayerList has just installed the ordinary listener. Replace both
+            // native references at the same lifecycle boundary: Connection.tick()
+            // reads packetListener, while Bukkit/NMS player operations read
+            // ServerPlayer.connection. Leaving either reference on the vanilla
+            // listener re-enables keep-alive expiry and the duplicate player tick.
+            Object fakeListener = installFakePlayerListener(
+                    serverHandle,
+                    connection,
+                    playerHandle,
+                    cookie
+            );
+            this.listener = new Listener(fakeListener);
             // Preserve the channel registration performed by the legacy listener.
             // Some proxy/plugin-message integrations inspect the player's registered
             // channels before sending the BungeeCord payload.
@@ -111,12 +135,309 @@ final class NMSNetworkImpl implements NMSNetwork {
             );
             return this.listener;
         } catch (Throwable throwable) {
-            // PlayerList.placeNewPlayer may fail after allocating the connection
-            // but before the registry receives PlayerQuitEvent. Release the
-            // synthetic channel here so the failed spawn cannot leak a task or
-            // an EmbeddedChannel.
-            this.close();
+            // PlayerList.placeNewPlayer and every subsequent setup stage may
+            // fail after the native player has been registered. Use the
+            // dedicated placement rollback, not the normal PlayerQuitEvent
+            // close path, so the native registry is removed before resources
+            // are released and the event/lifecycle owner remains unique.
+            this.rollbackFailedPlacement(throwable);
             throw NmsAccess.rethrow(throwable);
+        }
+    }
+
+    private static Object installFakePlayerListener(
+            Object serverHandle,
+            Object connection,
+            Object playerHandle,
+            Object cookie
+    ) {
+        return NmsListenerInstallation.install(new NmsListenerInstallation.State() {
+            @Override
+            public Object playerListener() {
+                return NmsAccess.getField(playerHandle, "connection");
+            }
+
+            @Override
+            public Object connectionListener() {
+                return NmsAccess.getField(connection, "packetListener");
+            }
+
+            @Override
+            public Object createFakeListener() {
+                return NmsAccess.newFakePlayerPacketListener(
+                        serverHandle,
+                        connection,
+                        playerHandle,
+                        cookie
+                );
+            }
+
+            @Override
+            public void setPlayerListener(Object listener) {
+                NmsAccess.setField(playerHandle, "connection", listener);
+            }
+
+            @Override
+            public void setConnectionListener(Object listener) {
+                NmsAccess.setField(connection, "packetListener", listener);
+            }
+        });
+    }
+
+    private void rollbackFailedPlacement(@NotNull Throwable placementFailure) {
+        var currentServerHandle = this.serverHandle;
+        var currentPlayerHandle = this.playerHandle;
+        var currentConnection = this.connection;
+        var currentPlayer = this.player;
+        this.placementRollbackState = NMSNetwork.PlacementRollbackState.IN_PROGRESS;
+
+        NmsPlacementRollback.Outcome outcome = null;
+        boolean clean = false;
+        try {
+            outcome = NmsPlacementRollback.rollback(new NmsPlacementRollback.Hooks() {
+                @Override
+                public boolean isRegistered() {
+                    return NMSNetworkImpl.isPlayerRegistered(currentServerHandle, currentPlayerHandle);
+                }
+
+                @Override
+                public void removeRegisteredPlayer() {
+                    NMSNetworkImpl.removeRegisteredPlayer(currentServerHandle, currentPlayerHandle);
+                }
+
+                @Override
+                public void disconnectRegisteredPlayer() {
+                    NMSNetworkImpl.disconnectRegisteredPlayer(
+                            currentServerHandle,
+                            currentPlayerHandle,
+                            currentConnection
+                    );
+                }
+
+                @Override
+                public void releaseResources() {
+                    NMSNetworkImpl.this.releaseFailedPlacementResources(currentConnection, currentPlayerHandle);
+                }
+
+                @Override
+                public boolean isClean() {
+                    return NMSNetworkImpl.this.isFailedPlacementClean(
+                            currentServerHandle,
+                            currentPlayerHandle,
+                        currentConnection
+                    );
+                }
+            });
+        } catch (Throwable rollbackFailure) {
+            // The helper is deliberately defensive, but retain a second guard
+            // here for an unexpected failure in the rollback boundary itself.
+            addSuppressed(placementFailure, rollbackFailure);
+            try {
+                // The helper normally owns this first attempt. The teardown
+                // guard makes this safe even if it failed before reaching its
+                // release phase.
+                releaseFailedPlacementResources(currentConnection, currentPlayerHandle);
+            } catch (Throwable releaseFailure) {
+                addSuppressed(placementFailure, releaseFailure);
+            }
+        }
+
+        try {
+            if (outcome != null && outcome.failure() != null) {
+                addSuppressed(placementFailure, outcome.failure());
+            }
+            clean = outcome != null && outcome.status() == NmsPlacementRollback.Status.CLEAN;
+            try {
+                clean = clean && this.isFailedPlacementClean(
+                        currentServerHandle,
+                        currentPlayerHandle,
+                        currentConnection
+                );
+            } catch (Throwable invariantFailure) {
+                clean = false;
+                addSuppressed(placementFailure, invariantFailure);
+            }
+            if (!clean || (outcome != null && outcome.status() == NmsPlacementRollback.Status.RESIDUAL)) {
+                var identity = currentPlayer == null
+                        ? "unknown"
+                        : currentPlayer.getUniqueId() + "/" + currentPlayer.getName();
+                LOG.severe(
+                        "NMS fake-player placement rollback left residual state for " + identity
+                                + "; native state is quarantined and must not be reused"
+                );
+            }
+        } finally {
+            this.placementRollbackState = clean
+                    ? NMSNetwork.PlacementRollbackState.CLEAN
+                    : NMSNetwork.PlacementRollbackState.RESIDUAL;
+        }
+    }
+
+    private static void addSuppressed(@NotNull Throwable primary, @NotNull Throwable secondary) {
+        if (primary != secondary) {
+            primary.addSuppressed(secondary);
+        }
+    }
+
+    private static boolean isPlayerRegistered(Object serverHandle, Object playerHandle) {
+        if (serverHandle == null || playerHandle == null) {
+            return false;
+        }
+        var playerList = NmsAccess.invoke(serverHandle, "getPlayerList");
+        var uuid = NmsAccess.invoke(playerHandle, "getUUID");
+        return uuid != null && NmsAccess.invoke(playerList, "getPlayer", uuid) != null;
+    }
+
+    private static void removeRegisteredPlayer(Object serverHandle, Object playerHandle) {
+        if (!isPlayerRegistered(serverHandle, playerHandle)) {
+            return;
+        }
+        var playerList = NmsAccess.invoke(serverHandle, "getPlayerList");
+        NmsAccess.invoke(playerList, "remove", playerHandle);
+    }
+
+    private static void disconnectRegisteredPlayer(
+            Object serverHandle,
+            Object playerHandle,
+            Object connection
+    ) {
+        Throwable failure = null;
+        if (connection != null) {
+            try {
+                var genericReason = NmsAccess.invokeStatic(
+                        "net.minecraft.network.chat.Component",
+                        "translatable",
+                        "multiplayer.disconnect.generic"
+                );
+                NmsAccess.invoke(connection, "disconnect", genericReason);
+            } catch (Throwable disconnectFailure) {
+                failure = disconnectFailure;
+            }
+            try {
+                NmsAccess.invoke(connection, "handleDisconnection");
+            } catch (Throwable disconnectionFailure) {
+                if (failure == null) {
+                    failure = disconnectionFailure;
+                } else {
+                    failure.addSuppressed(disconnectionFailure);
+                }
+            }
+        }
+
+        if (failure != null) {
+            throw NmsAccess.rethrow(failure);
+        }
+    }
+
+    private void releaseFailedPlacementResources(Object currentConnection, Object currentPlayerHandle) {
+        if (!this.teardownStarted.compareAndSet(false, true)) {
+            return;
+        }
+
+        Throwable failure = null;
+        var task = this.outboundTask;
+        this.outboundTask = null;
+        if (task != null) {
+            try {
+                task.cancel();
+            } catch (Throwable taskFailure) {
+                failure = taskFailure;
+            }
+        }
+        this.outbound.clear();
+
+        try {
+            // Unlike normal Folia quit cleanup, failed placement has no native
+            // disconnect owner left to close the synthetic channel for us.
+            closeSyntheticConnection(currentConnection);
+        } catch (Throwable connectionFailure) {
+            if (failure == null) {
+                failure = connectionFailure;
+            } else {
+                failure.addSuppressed(connectionFailure);
+            }
+        }
+
+        if (currentPlayerHandle != null) {
+            try {
+                NmsAccess.cleanupAdvancementSink(currentPlayerHandle);
+            } catch (Throwable advancementFailure) {
+                if (failure == null) {
+                    failure = advancementFailure;
+                } else {
+                    failure.addSuppressed(advancementFailure);
+                }
+            }
+        }
+        this.connection = null;
+        this.serverHandle = null;
+        this.playerHandle = null;
+        this.listener = null;
+        this.player = null;
+
+        if (failure != null) {
+            throw NmsAccess.rethrow(failure);
+        }
+    }
+
+    private boolean isFailedPlacementClean(
+            Object currentServerHandle,
+            Object currentPlayerHandle,
+            Object currentConnection
+    ) {
+        return !isPlayerRegistered(currentServerHandle, currentPlayerHandle)
+                && !isConnectionOpen(currentConnection)
+                && this.connection == null
+                && this.serverHandle == null
+                && this.playerHandle == null
+                && this.listener == null
+                && this.player == null
+                && this.outboundTask == null
+                && this.outbound.isEmpty();
+    }
+
+    private static boolean isConnectionOpen(Object connection) {
+        if (connection == null) {
+            return false;
+        }
+        var channel = NmsAccess.getFieldOptional(connection, "channel");
+        return Boolean.TRUE.equals(NmsAccess.invokeOptional(channel, "isOpen"));
+    }
+
+    static void closeSyntheticConnection(Object connection) {
+        if (connection == null) {
+            return;
+        }
+        var channel = NmsAccess.getFieldOptional(connection, "channel");
+        if (channel == null) {
+            return;
+        }
+
+        Throwable failure = null;
+        try {
+            // Use the strict reflection path here. The optional helper
+            // intentionally swallows RuntimeException and would make a
+            // failed close invisible to the placement invariant.
+            NmsAccess.invoke(channel, "close");
+        } catch (Throwable closeFailure) {
+            failure = closeFailure;
+        }
+
+        try {
+            // Netty's reference-count release is independent of close(). It
+            // must still run when close() failed, otherwise the failed login
+            // can retain the embedded channel's buffers.
+            NmsAccess.invoke(channel, "finishAndReleaseAll");
+        } catch (Throwable releaseFailure) {
+            if (failure == null) {
+                failure = releaseFailure;
+            } else {
+                failure.addSuppressed(releaseFailure);
+            }
+        }
+
+        if (failure != null) {
+            throw NmsAccess.rethrow(failure);
         }
     }
 
@@ -147,7 +468,32 @@ final class NMSNetworkImpl implements NMSNetwork {
     }
 
     @Override
+    public @NotNull NMSNetwork.PlacementRollbackState getPlacementRollbackState() {
+        return this.placementRollbackState;
+    }
+
+    @Override
+    public boolean hasPlacementRollbackResidual() {
+        return this.placementRollbackState == NMSNetwork.PlacementRollbackState.RESIDUAL;
+    }
+
+    @Override
+    public boolean isPlacementRollbackInProgress() {
+        return this.placementRollbackState == NMSNetwork.PlacementRollbackState.IN_PROGRESS;
+    }
+
+    @Override
     public void close() {
+        // Once placement rollback starts, its native transaction remains the
+        // sole owner of connection/listener teardown. CLEAN and RESIDUAL are
+        // sticky terminal states and must not be re-entered by quit cleanup.
+        if (this.placementRollbackState != NMSNetwork.PlacementRollbackState.NOT_STARTED) {
+            return;
+        }
+        if (!this.teardownStarted.compareAndSet(false, true)) {
+            return;
+        }
+
         var task = this.outboundTask;
         this.outboundTask = null;
         if (task != null) {

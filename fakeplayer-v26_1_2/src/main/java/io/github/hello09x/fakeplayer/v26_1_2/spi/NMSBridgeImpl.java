@@ -53,6 +53,7 @@ public class NMSBridgeImpl implements NMSBridge {
                 "net.minecraft.server.level.ServerPlayer",
                 "net.minecraft.server.players.PlayerList",
                 "net.minecraft.server.network.CommonListenerCookie",
+                "net.minecraft.server.network.ServerGamePacketListenerImpl",
                 "net.minecraft.network.Connection",
                 "net.minecraft.network.protocol.PacketFlow",
                 "net.minecraft.network.protocol.game.GameProtocols",
@@ -73,6 +74,8 @@ public class NMSBridgeImpl implements NMSBridge {
         NmsAccess.requireMethod("net.minecraft.server.MinecraftServer", "registryAccess", 0);
         NmsAccess.requireMethod("net.minecraft.server.players.PlayerList", "placeNewPlayer", 3);
         NmsAccess.requireMethod("net.minecraft.server.players.PlayerList", "remove", 1);
+        NmsAccess.requireMethod("net.minecraft.server.network.ServerGamePacketListenerImpl", "tick", 0);
+        NmsAccess.requireMethod("net.minecraft.server.network.ServerGamePacketListenerImpl", "hasClientLoaded", 0);
         NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "getBukkitEntity", 0);
         NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "getInventory", 0);
         NmsAccess.requireMethod("net.minecraft.server.level.ServerPlayer", "setPos", 3);
@@ -88,7 +91,9 @@ public class NMSBridgeImpl implements NMSBridge {
         NmsAccess.requireField("net.minecraft.network.protocol.game.GameProtocols", "CLIENTBOUND_TEMPLATE");
         NmsAccess.requireField("net.minecraft.network.Connection", "channel");
         NmsAccess.requireField("net.minecraft.network.Connection", "address");
+        NmsAccess.requireField("net.minecraft.network.Connection", "packetListener");
         NmsAccess.requireField("net.minecraft.server.level.ServerPlayer", "connection");
+        NmsAccess.verifyFakePlayerPacketListener();
     }
 
     @Override

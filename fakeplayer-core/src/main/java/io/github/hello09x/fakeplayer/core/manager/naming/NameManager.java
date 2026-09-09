@@ -48,6 +48,8 @@ public class NameManager {
     private final Map<String, NameSource> nameSources = new ConcurrentHashMap<>();
     /** Coalesce concurrent Folia UUID lookups for the same persistent name. */
     private final Map<String, CompletableFuture<UUID>> asyncUUIDs = new ConcurrentHashMap<>();
+    /** Names whose native placement failed closed during this process. */
+    private final Set<String> quarantinedNames = ConcurrentHashMap.newKeySet();
 
     private final String serverId;
 
@@ -148,6 +150,9 @@ public class NameManager {
         } catch (Throwable throwable) {
             return CompletableFuture.failedFuture(throwable);
         }
+        if (this.quarantinedNames.contains(normalized)) {
+            return CompletableFuture.failedFuture(this.quarantinedNameError(normalized));
+        }
 
         return this.readCustomNameLookupAsync(normalized).thenCompose(lookup -> {
             if (lookup.online()) {
@@ -163,7 +168,12 @@ public class NameManager {
                             return CompletableFuture.failedFuture(this.usedNameError(normalized, lookup.uuid()));
                         }
                         return this.getUUIDFromNameAsync(normalized)
-                                .thenApply(uuid -> new SequenceName("custom", 0, uuid, normalized));
+                                .thenApply(uuid -> {
+                                    if (this.quarantinedNames.contains(normalized)) {
+                                        throw this.quarantinedNameError(normalized);
+                                    }
+                                    return new SequenceName("custom", 0, uuid, normalized);
+                                });
                     });
         });
     }
@@ -202,6 +212,9 @@ public class NameManager {
      */
     public @NotNull SequenceName getSpecifiedName(@NotNull String name) {
         name = this.normalizeSpecifiedName(name);
+        if (this.quarantinedNames.contains(name)) {
+            throw this.quarantinedNameError(name);
+        }
 
         {
             var player = Bukkit.getPlayerExact(name);
@@ -281,6 +294,13 @@ public class NameManager {
         ).color(RED));
     }
 
+    private @NotNull IllegalCustomNameException quarantinedNameError(@NotNull String name) {
+        return new IllegalCustomNameException(text(
+                "Fake-player name '" + name + "' is quarantined after an incomplete placement rollback.",
+                RED
+        ));
+    }
+
     /**
      * 获取一个序列名
      *
@@ -308,6 +328,9 @@ public class NameManager {
                 name = source + suffix;
             }
 
+            if (this.quarantinedNames.contains(name)) {
+                continue;
+            }
             if (Bukkit.getPlayerExact(name) != null) {
                 this.unregister(source, seq);
                 continue;
@@ -326,7 +349,7 @@ public class NameManager {
         String name;
         for (int i = 0; i < 10; i++) {
             name = RandomStringUtils.randomAlphanumeric(MAX_LENGTH);
-            if (Bukkit.getPlayerExact(name) != null) {
+            if (this.quarantinedNames.contains(name) || Bukkit.getPlayerExact(name) != null) {
                 continue;
             }
             log.warning("Failed to generate a regular name for fake player after 10 attempts, using a random name as fallback: " + name);
@@ -352,6 +375,9 @@ public class NameManager {
         }
 
         var name = this.sequenceName(context.source(), sequence);
+        if (this.quarantinedNames.contains(name)) {
+            return this.nextRegularNameAsync(context, attempt + 1);
+        }
         if (context.onlineNames().contains(name)) {
             this.unregister(context.source(), sequence);
             return this.nextRegularNameAsync(context, attempt + 1);
@@ -360,6 +386,9 @@ public class NameManager {
         return this.getUUIDFromNameAsync(name)
                 .<CompletableFuture<SequenceName>>handle((uuid, throwable) -> {
                     if (throwable == null) {
+                        if (this.quarantinedNames.contains(name)) {
+                            return this.nextRegularNameAsync(context, attempt + 1);
+                        }
                         return CompletableFuture.completedFuture(
                                 new SequenceName(context.source(), sequence, uuid, name)
                         );
@@ -401,13 +430,22 @@ public class NameManager {
         }
 
         var name = RandomStringUtils.randomAlphanumeric(MAX_LENGTH);
-        if (context.onlineNames().contains(name)) {
+        if (this.quarantinedNames.contains(name) || context.onlineNames().contains(name)) {
             return this.nextRandomNameAsync(context, attempt + 1);
         }
 
         log.warning("Failed to generate a regular name for fake player after 10 attempts, using a random name as fallback: " + name);
         return this.getUUIDFromNameAsync(name)
-                .thenApply(uuid -> new SequenceName("random", 0, uuid, name));
+                .thenCompose(uuid -> {
+                    // UUID resolution is asynchronous. A native placement
+                    // rollback can quarantine this random name while the
+                    // lookup is in flight, so check again before publishing
+                    // the reservation to the spawn transaction.
+                    if (this.quarantinedNames.contains(name)) {
+                        return this.nextRandomNameAsync(context, attempt + 1);
+                    }
+                    return CompletableFuture.completedFuture(new SequenceName("random", 0, uuid, name));
+                });
     }
 
     private @NotNull String sequenceName(@NotNull String source, int sequence) {
@@ -545,8 +583,27 @@ public class NameManager {
      *
      * @param sn 序列名
      */
-    public void unregister(@NotNull SequenceName sn) {
+    public synchronized void unregister(@NotNull SequenceName sn) {
+        // Quarantining and returning a reservation must be one critical
+        // section. Otherwise a late cleanup callback could put a residual
+        // native name back into NameSource after quarantine, allowing it to
+        // be allocated again later in this process.
+        if (this.quarantinedNames.contains(sn.name())) {
+            return;
+        }
         this.unregister(sn.group(), sn.sequence());
+    }
+
+    /**
+     * Permanently skip a name for the lifetime of this plugin process. This is
+     * intentionally in-memory: a residual native player is not safe to reuse,
+     * while restart recovery must be handled by the server-side audit path.
+     */
+    public synchronized void quarantine(@NotNull SequenceName sequenceName) {
+        if (this.quarantinedNames.add(sequenceName.name())) {
+            log.severe("Quarantined fake-player name '" + sequenceName.name()
+                    + "' after an incomplete native placement rollback");
+        }
     }
 
     private record CustomNameLookup(boolean online, UUID uuid, boolean hasPlayedBefore) {

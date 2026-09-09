@@ -33,6 +33,9 @@ public class OpenInvInvseeManagerImpl extends AbstractInvseeManager {
         } catch (InstantiationException e) {
             log.warning("Failed to %s's open inventory for %s\n%s".formatted(whom.getName(), viewer.getName(), Throwables.getStackTraceAsString(e)));
             return null;
+        } catch (IllegalStateException e) {
+            log.warning("OpenInv failed to open inventory for %s: %s".formatted(whom.getName(), e.getMessage()));
+            return null;
         }
     }
 }

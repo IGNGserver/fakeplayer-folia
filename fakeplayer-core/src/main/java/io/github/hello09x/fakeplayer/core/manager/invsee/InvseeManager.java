@@ -12,4 +12,8 @@ public interface InvseeManager extends Listener {
 
     boolean invsee(@NotNull Player viewer, @NotNull Player whom);
 
+    /** Release viewer-owned mirrors before the plugin scheduler is stopped. */
+    default void onDisable() {
+    }
+
 }

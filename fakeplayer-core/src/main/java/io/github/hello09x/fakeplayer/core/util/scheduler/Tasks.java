@@ -349,7 +349,23 @@ public final class Tasks {
                 return;
             }
             try {
-                scheduled.getClass().getMethod("cancel").invoke(scheduled);
+                // Folia returns a package-private implementation of the public
+                // ScheduledTask interface. Looking up the method on that
+                // implementation and invoking it without making it accessible
+                // throws IllegalAccessException, leaving repeating tasks alive
+                // after every fake-player/session cleanup. Resolve the public
+                // API method first and make the reflective handle accessible
+                // for runtimes whose implementation class is not public.
+                var scheduledTaskType = Class.forName(
+                        "io.papermc.paper.threadedregions.scheduler.ScheduledTask",
+                        false,
+                        scheduled.getClass().getClassLoader()
+                );
+                var cancel = scheduledTaskType.getMethod("cancel");
+                if (!cancel.canAccess(scheduled)) {
+                    cancel.setAccessible(true);
+                }
+                cancel.invoke(scheduled);
             } catch (Throwable ignored) {
             }
         }

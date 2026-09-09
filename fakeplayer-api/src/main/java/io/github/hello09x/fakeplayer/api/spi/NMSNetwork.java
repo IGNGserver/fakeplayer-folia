@@ -8,6 +8,21 @@ import org.jetbrains.annotations.NotNull;
 public interface NMSNetwork {
 
     /**
+     * State of the native placement rollback transaction.
+     *
+     * <p>{@link #NOT_STARTED} is also the compatibility state for version
+     * adapters that predate placement rollback. Once a rollback starts it must
+     * remain observable as {@link #CLEAN} or {@link #RESIDUAL}; clearing native
+     * references must not erase the result.</p>
+     */
+    enum PlacementRollbackState {
+        NOT_STARTED,
+        IN_PROGRESS,
+        CLEAN,
+        RESIDUAL
+    }
+
+    /**
      * 绑定一个虚拟的游戏连接
      *
      * @param server 服务器
@@ -34,6 +49,33 @@ public interface NMSNetwork {
      * the default no-op implementation.
      */
     default void close() {
+    }
+
+    /**
+     * Returns the sticky result of the native placement rollback transaction.
+     * Older adapters can retain their boolean overrides and are interpreted by
+     * this compatibility default.
+     */
+    default @NotNull PlacementRollbackState getPlacementRollbackState() {
+        return PlacementRollbackState.NOT_STARTED;
+    }
+
+    /**
+     * Returns whether the last native placement rollback could not prove that
+     * all server-side state was removed. Core cleanup uses this as a
+     * quarantine signal instead of treating the spawn as an ordinary rollback.
+     */
+    default boolean hasPlacementRollbackResidual() {
+        return this.getPlacementRollbackState() == PlacementRollbackState.RESIDUAL;
+    }
+
+    /**
+     * Returns whether native placement rollback currently owns cleanup. A
+     * concurrent PlayerQuitEvent must not close the same connection or return
+     * its name before that rollback has reached a final result.
+     */
+    default boolean isPlacementRollbackInProgress() {
+        return this.getPlacementRollbackState() == PlacementRollbackState.IN_PROGRESS;
     }
 
     /**

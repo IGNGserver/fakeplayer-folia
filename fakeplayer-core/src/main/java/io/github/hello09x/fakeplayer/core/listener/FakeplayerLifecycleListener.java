@@ -43,6 +43,25 @@ public class FakeplayerLifecycleListener implements Listener {
             return;
         }
 
+        if (fake.isSpawnPending()) {
+            // A native placement/login failure may remove the player from the
+            // server PlayerList before the spawn future reports its failure.
+            // Do not start post-quit commands here: the spawn failure
+            // continuation owns the durable rollback, while this dedicated
+            // path releases registry/name/action/network state once.
+            if (fake.isPlacementRollbackInProgress()) {
+                // NMS rollback may synchronously fire PlayerQuitEvent while it
+                // is still retrying PlayerList removal and closing the
+                // synthetic channel. Let the placement continuation remain
+                // the sole cleanup owner; re-entering close here can clear the
+                // adapter state before its residual invariant is recorded.
+                fake.markPlacementRollbackQuitObserved();
+                return;
+            }
+            this.manager.cleanupFailedPlacement(fake);
+            return;
+        }
+
         this.quitting.put(fake.getUUID(), new QuitContext(fake, manager.startQuitLifecycle(fake)));
     }
 
@@ -74,7 +93,7 @@ public class FakeplayerLifecycleListener implements Listener {
         afterQuitTasks.put(context.fakeplayer(), task);
     }
 
-    /** Cancel delayed lifecycle hooks when the plugin is being unloaded. */
+    /** Cancel delayed lifecycle hooks before the shutdown coordinator stops async work. */
     public void onDisable() {
         afterQuitTasks.values().forEach(Tasks.Task::cancel);
         afterQuitTasks.clear();

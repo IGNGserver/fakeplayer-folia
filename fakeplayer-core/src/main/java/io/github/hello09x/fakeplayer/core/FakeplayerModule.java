@@ -9,6 +9,7 @@ import io.github.hello09x.fakeplayer.core.manager.FakeplayerList;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerManager;
 import io.github.hello09x.fakeplayer.core.manager.action.ActionManager;
 import io.github.hello09x.fakeplayer.core.manager.invsee.InvseeManager;
+import io.github.hello09x.fakeplayer.core.manager.invsee.OpenInvCompatibility;
 import io.github.hello09x.fakeplayer.core.manager.invsee.OpenInvInvseeManagerImpl;
 import io.github.hello09x.fakeplayer.core.manager.invsee.SimpleInvseeManagerImpl;
 import io.github.hello09x.fakeplayer.core.placeholder.FakeplayerPlaceholderExpansion;
@@ -37,9 +38,17 @@ public class FakeplayerModule extends AbstractModule {
         return switch (config.getInvseeImplement()) {
             case SIMPLE -> new SimpleInvseeManagerImpl(fakeplayerManager, fakeplayerList);
             case AUTO -> {
-                if (Bukkit.getPluginManager().isPluginEnabled("OpenInv") && ClassUtils.isClassExists("com.lishid.openinv.IOpenInv")) {
-                    log.info("Using OpenInv as invsee implement");
-                    yield new OpenInvInvseeManagerImpl(fakeplayerManager, fakeplayerList);
+                Plugin openInv = Bukkit.getPluginManager().getPlugin("OpenInv");
+                if (openInv != null
+                        && Bukkit.getPluginManager().isPluginEnabled("OpenInv")
+                        && ClassUtils.isClassExists("com.lishid.openinv.IOpenInv")) {
+                    String version = openInv.getDescription().getVersion();
+                    if (OpenInvCompatibility.isSupported(version)) {
+                        log.info("Using OpenInv " + version + " as invsee implement");
+                        yield new OpenInvInvseeManagerImpl(fakeplayerManager, fakeplayerList);
+                    }
+                    log.warning("OpenInv " + version + " is incompatible with the modern invsee adapter; "
+                            + "OpenInv " + OpenInvCompatibility.MINIMUM_VERSION + "+ is required. Falling back to simple invsee.");
                 }
                 log.info("Using simple invsee implement");
                 yield new SimpleInvseeManagerImpl(fakeplayerManager, fakeplayerList);

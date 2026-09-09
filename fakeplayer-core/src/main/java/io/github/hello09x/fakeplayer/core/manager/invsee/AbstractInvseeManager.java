@@ -11,7 +11,6 @@ import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
-import org.bukkit.event.inventory.ClickType;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
@@ -24,6 +23,7 @@ import org.bukkit.inventory.ItemStack;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Map;
 import java.util.UUID;
@@ -38,9 +38,12 @@ import static net.kyori.adventure.text.Component.translatable;
  **/
 public abstract class AbstractInvseeManager implements InvseeManager {
 
+    private static final int CROSS_REGION_TOP_SLOTS = 36;
+
     protected final FakeplayerManager manager;
     protected final FakeplayerList fakeplayerList;
     private final Map<UUID, CrossRegionSession> crossRegionSessions = new ConcurrentHashMap<>();
+    private final Object crossRegionSessionLock = new Object();
 
     protected AbstractInvseeManager(FakeplayerManager manager, FakeplayerList fakeplayerList) {
         this.manager = manager;
@@ -80,14 +83,22 @@ public abstract class AbstractInvseeManager implements InvseeManager {
                     0.3F, 1.0F
             );
         }
-        view.setTitle(ComponentUtils.toString(translatable(
-                "fakeplayer.manager.inventory.title",
-                text(whom.getName())
-        ), viewer.locale()));
         return true;
     }
 
     protected abstract @Nullable InventoryView openInventory(@NotNull Player viewer, @NotNull Player whom);
+
+    /**
+     * Titles are part of menu construction. Applying a title after opening a
+     * typed inventory can make the server change its menu declaration without
+     * changing the already prepared slot payload.
+     */
+    protected final @NotNull String inventoryTitle(@NotNull Player viewer, @NotNull Player whom) {
+        return ComponentUtils.toString(translatable(
+                "fakeplayer.manager.inventory.title",
+                text(whom.getName())
+        ), viewer.locale());
+    }
 
     /**
      * Folia does not allow a viewer-region inventory view to directly expose a
@@ -102,32 +113,48 @@ public abstract class AbstractInvseeManager implements InvseeManager {
     private boolean openCrossRegion(@NotNull Player viewer, @NotNull Player whom) {
         Tasks.call(Main.getInstance(), whom, () -> copyContents(whom))
                 .thenAccept(contents -> Tasks.run(Main.getInstance(), viewer, () -> {
-                    if (!viewer.isOnline() || fakeplayerList.getByUUID(whom.getUniqueId()) == null) {
+                    var target = fakeplayerList.getByUUID(whom.getUniqueId());
+                    if (!viewer.isOnline() || target == null || target.getPlayer() != whom) {
                         return;
                     }
 
-                    var inventory = Bukkit.createInventory(null, InventoryType.PLAYER);
+                    var inventory = Bukkit.createInventory(
+                            null,
+                            CROSS_REGION_TOP_SLOTS,
+                            inventoryTitle(viewer, whom)
+                    );
                     try {
-                        inventory.setContents(contents);
+                        // Keep the existing cross-region presentation (the
+                        // first 36 slots) while making the client menu shape
+                        // explicit instead of relying on PLAYER's 43-slot
+                        // storage container being rendered as a 4-row menu.
+                        inventory.setContents(Arrays.copyOf(contents, CROSS_REGION_TOP_SLOTS));
                     } catch (IllegalArgumentException failure) {
                         viewer.sendMessage(translatable("fakeplayer.command.invsee.error.cross-region"));
                         return;
                     }
 
-                    crossRegionSessions.put(
-                            viewer.getUniqueId(),
-                            new CrossRegionSession(inventory)
-                    );
+                    var session = new CrossRegionSession(viewer, whom, inventory);
+                    synchronized (crossRegionSessionLock) {
+                        if (!viewer.isOnline()
+                                || fakeplayerList.getByUUID(whom.getUniqueId()) != target) {
+                            return;
+                        }
+                        crossRegionSessions.put(viewer.getUniqueId(), session);
+                    }
+
+                    // The target can quit between the snapshot and the viewer
+                    // task. Recheck immediately before opening; the quit
+                    // handler also removes any session already published.
+                    if (fakeplayerList.getByUUID(whom.getUniqueId()) != target) {
+                        crossRegionSessions.remove(viewer.getUniqueId(), session);
+                        return;
+                    }
 
                     var view = viewer.openInventory(inventory);
                     if (view == null) {
-                        crossRegionSessions.remove(viewer.getUniqueId());
-                        return;
+                        crossRegionSessions.remove(viewer.getUniqueId(), session);
                     }
-                    view.setTitle(ComponentUtils.toString(translatable(
-                            "fakeplayer.manager.inventory.title",
-                            text(whom.getName())
-                    ), viewer.locale()));
                 }))
                 .exceptionally(throwable -> {
                     Tasks.run(Main.getInstance(), viewer, () -> viewer.sendMessage(
@@ -191,11 +218,10 @@ public abstract class AbstractInvseeManager implements InvseeManager {
             return;
         }
         var session = sessionFor(viewer, event.getView());
-        var topSize = event.getView().getTopInventory().getSize();
-        var affectsTop = event.getRawSlot() >= 0 && event.getRawSlot() < topSize
-                || event.isShiftClick()
-                || event.getClick() == ClickType.DOUBLE_CLICK;
-        if (session != null && affectsTop) {
+        // The cross-region inventory is a snapshot. Cancel every click mode,
+        // including number/drop/off-hand actions on the bottom inventory, so
+        // the viewer cannot mutate local state while looking at a stale mirror.
+        if (session != null) {
             event.setCancelled(true);
         }
     }
@@ -206,9 +232,7 @@ public abstract class AbstractInvseeManager implements InvseeManager {
             return;
         }
         var session = sessionFor(viewer, event.getView());
-        var topSize = event.getView().getTopInventory().getSize();
-        if (session != null && event.getRawSlots().stream()
-                .anyMatch(slot -> slot >= 0 && slot < topSize)) {
+        if (session != null) {
             event.setCancelled(true);
         }
     }
@@ -225,12 +249,66 @@ public abstract class AbstractInvseeManager implements InvseeManager {
         crossRegionSessions.remove(viewer.getUniqueId(), session);
     }
 
+    @Override
+    public void onDisable() {
+        var sessionsToClose = new ArrayList<CrossRegionSession>();
+        synchronized (crossRegionSessionLock) {
+            sessionsToClose.addAll(crossRegionSessions.values());
+            crossRegionSessions.clear();
+        }
+        sessionsToClose.forEach(this::closeSession);
+    }
+
     @EventHandler
     public void quitCrossRegion(@NotNull PlayerQuitEvent event) {
-        crossRegionSessions.remove(event.getPlayer().getUniqueId());
+        var quitting = event.getPlayer();
+        var sessionsToClose = new ArrayList<CrossRegionSession>();
+        synchronized (crossRegionSessionLock) {
+            // A viewer quit invalidates its own local mirror.
+            crossRegionSessions.remove(quitting.getUniqueId());
+
+            // A target quit invalidates every viewer-owned snapshot of that
+            // exact Player instance. Compare by identity so a later fake
+            // player reusing the UUID cannot be closed by an old quit event.
+            for (var entry : crossRegionSessions.entrySet()) {
+                var session = entry.getValue();
+                if (session.target() == quitting
+                        && crossRegionSessions.remove(entry.getKey(), session)) {
+                    sessionsToClose.add(session);
+                }
+            }
+        }
+
+        // Inventory operations belong to the viewer's entity scheduler on
+        // Folia. The map entry is removed above before scheduling, making this
+        // safe if the viewer closes or opens another inventory first.
+        sessionsToClose.forEach(this::closeSession);
+    }
+
+    private void closeSession(@NotNull CrossRegionSession session) {
+        var viewer = session.viewer();
+        if (!viewer.isOnline()) {
+            return;
+        }
+        try {
+            Tasks.run(Main.getInstance(), viewer, () -> {
+                if (!viewer.isOnline()) {
+                    return;
+                }
+                var view = viewer.getOpenInventory();
+                if (view.getTopInventory() == session.inventory()) {
+                    viewer.closeInventory();
+                }
+            });
+        } catch (Throwable ignored) {
+            // Plugin shutdown or a retired viewer scheduler may reject the
+            // close; the session was already removed and cannot be reused.
+        }
     }
 
     private record CrossRegionSession(
+            @NotNull Player viewer,
+            @NotNull Player target,
             @NotNull Inventory inventory
     ) {
     }

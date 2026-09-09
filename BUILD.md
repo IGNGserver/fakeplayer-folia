@@ -28,7 +28,7 @@ checkout does not need a root `lib/` directory or any BuildTools-generated NMS
 artifact:
 
 ```
-./mvnw -B -ntp -Drevision=0.3.19-folia.3 \
+./mvnw -B -ntp -Drevision=0.3.19-folia.4 \
     -pl fakeplayer-modern-dist -am clean verify
 ```
 
@@ -37,7 +37,7 @@ so incremental builds are safe; `clean` remains recommended for release and
 runtime verification.
 
 The final plugin is produced at
-`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.3.jar`. The shaded jar
+`fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.4.jar`. The shaded jar
 contains both modern ServiceLoader providers and keeps OpenInv, PlaceholderAPI
 and CommandAPI as server-side dependencies.
 
@@ -90,21 +90,22 @@ APIs are resolved from Maven repositories, so a clean checkout no longer needs
 manually copied jars in a root `lib/` directory. The finished plugin only
 activates these integrations when the corresponding server plugin is present.
 
-The pinned compile-time API versions are OpenInv 5.3.1 and PlaceholderAPI
-2.12.3. They are not shaded into the distribution jar and must still be
-installed separately on the server when those integrations are desired. For
-PlaceholderAPI, use its official server plugin distribution at runtime; the
-Maven artifact is only used to compile the optional expansion integration.
+The pinned compile-time API versions are OpenInv 5.3.3 and PlaceholderAPI
+2.12.3. On 26.1.2, AUTO invsee requires OpenInv 5.3.2 or newer. These APIs are
+not shaded into the distribution jar and must still be installed separately
+on the server when those integrations are desired. For PlaceholderAPI, use
+its official server plugin distribution at runtime; the Maven artifact is
+only used to compile the optional expansion integration.
 
 ## 4. Build the full legacy distribution
 
 After installing the matching BuildTools artifacts for every legacy module, run:
 
 ```
-./mvnw -B -ntp -Drevision=0.3.19-folia.3 verify
+./mvnw -B -ntp -Drevision=0.3.19-folia.4 verify
 ```
 
-The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.3.jar` by
+The full shaded jar is produced at `target/fakeplayer-0.3.19-folia.4.jar` by
 `fakeplayer-dist`. Copy the appropriate modern or full distribution jar to
 your server's `plugins/` folder.
 

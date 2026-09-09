@@ -148,11 +148,11 @@ kale-tps: 0
 
 # Invsee implement:
 # Options:
-#   AUTO: Auto choose a implement depends on server plugins. Supports: OpenInv
+#   AUTO: Auto choose a implement depends on server plugins. Supports: OpenInv 5.3.2+
 #   SIMPLE: A simple implement, with it, you can NOT visit or modify equipments
 # Invsee 实现:
 # 可选项:
-#   AUTO: 自动，自动根据服务器安装的插件来选择, 当前支持的插件: OpenInv
+#   AUTO: 自动，自动根据服务器安装的插件来选择, 当前支持的插件: OpenInv 5.3.2+
 #   SIMPLE: 一个简单的内嵌实现, 使用这个不能看到或者编辑假人的装备栏
 # 修改此项或增删 OpenInv 后需要重启服务器；/fp reload 不会替换已经创建的实现。
 # Changes to this option or OpenInv installation take effect after a restart;

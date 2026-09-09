@@ -70,28 +70,46 @@ public final class PluginAsyncExecutor {
         });
     }
 
-    public void shutdown() {
-        if (!this.shuttingDown.compareAndSet(false, true)) {
-            return;
-        }
+    /**
+     * Stop accepting work and confirm that both plugin-owned pools terminated.
+     *
+     * <p>This method is intentionally retryable. A task that ignores
+     * interruption can outlive the first bounded wait; a later shutdown call
+     * must re-issue the stop request and observe the current state instead of
+     * treating the first attempt as successful.</p>
+     *
+     * @return {@code true} only after both the IO and CPU pools terminated
+     */
+    public synchronized boolean shutdown() {
+        this.shuttingDown.set(true);
         for (var future : this.pending) {
             future.cancel(false);
         }
         this.pending.clear();
         this.io.shutdownNow();
         this.cpu.shutdownNow();
-        awaitTermination(this.io);
-        awaitTermination(this.cpu);
+
+        var interrupted = new boolean[1];
+        var ioTerminated = awaitTermination(this.io, interrupted);
+        var cpuTerminated = awaitTermination(this.cpu, interrupted);
+        if (interrupted[0]) {
+            Thread.currentThread().interrupt();
+        }
+        return ioTerminated && cpuTerminated;
     }
 
-    private static void awaitTermination(@NotNull ThreadPoolExecutor executor) {
+    private static boolean awaitTermination(
+            @NotNull ThreadPoolExecutor executor,
+            boolean[] interrupted
+    ) {
         try {
-            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
-                throw new IllegalStateException("fakeplayer async executor did not terminate within 5 seconds");
-            }
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("Interrupted while stopping fakeplayer async executor", interrupted);
+            return executor.awaitTermination(5, TimeUnit.SECONDS);
+        } catch (InterruptedException interruption) {
+            // Keep checking the other pool. Restore the caller's interrupt
+            // status only after both termination observations are complete.
+            interrupted[0] = true;
+            Thread.interrupted();
+            return false;
         }
     }
 

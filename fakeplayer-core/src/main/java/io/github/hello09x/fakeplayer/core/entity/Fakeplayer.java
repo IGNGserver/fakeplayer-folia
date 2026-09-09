@@ -34,12 +34,20 @@ import java.net.InetAddress;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static net.kyori.adventure.text.Component.text;
 import static net.kyori.adventure.text.Component.translatable;
 import static net.kyori.adventure.text.format.NamedTextColor.*;
 
 public class Fakeplayer {
+
+    private enum SpawnState {
+        PENDING,
+        ACTIVE,
+        FAILED
+    }
 
     private final static InternalAddressGenerator ipGen = new InternalAddressGenerator();
     private final static FakeplayerConfig config = Main.getInjector().getInstance(FakeplayerConfig.class);
@@ -83,6 +91,19 @@ public class Fakeplayer {
     @Getter
     @UnknownNullability
     private volatile NMSNetwork network;
+
+    /**
+     * A quit raised while the spawn transaction is pending belongs to the
+     * failed-placement path, not to normal post-quit lifecycle processing.
+     */
+    private final AtomicReference<SpawnState> spawnState = new AtomicReference<>(SpawnState.PENDING);
+    /** The sequence slot belongs to this spawn instance and is returned once. */
+    private final AtomicBoolean nameReleased = new AtomicBoolean();
+    /** Sticky copy because the version adapter clears its native references during close. */
+    private volatile NMSNetwork.PlacementRollbackState placementRollbackState =
+            NMSNetwork.PlacementRollbackState.NOT_STARTED;
+    /** Native rollback can synchronously trigger quit; manager must not kick again. */
+    private final AtomicBoolean placementRollbackQuitObserved = new AtomicBoolean();
 
     /** Last region-thread-owned location made available to global/command code. */
     private volatile Location locationSnapshot;
@@ -213,6 +234,69 @@ public class Fakeplayer {
                 })).thenCompose(future -> future);
     }
 
+    public boolean markSpawnCommitted() {
+        return this.spawnState.compareAndSet(SpawnState.PENDING, SpawnState.ACTIVE);
+    }
+
+    public void markSpawnFailed() {
+        this.spawnState.compareAndSet(SpawnState.PENDING, SpawnState.FAILED);
+    }
+
+    public boolean isSpawnPending() {
+        return this.spawnState.get() == SpawnState.PENDING;
+    }
+
+    /** Claim the one-time name-release operation for this spawn instance. */
+    public boolean markNameReleased() {
+        return this.nameReleased.compareAndSet(false, true);
+    }
+
+    /**
+     * Preserve the native adapter's residual signal before its references are
+     * released. A residual placement must quarantine its name for this process.
+     */
+    public boolean hasPlacementRollbackResidual() {
+        return this.getPlacementRollbackState() == NMSNetwork.PlacementRollbackState.RESIDUAL;
+    }
+
+    /**
+     * Native rollback owns cleanup while this is true. In particular, a
+     * synchronous PlayerQuitEvent must not re-enter network close.
+     */
+    public boolean isPlacementRollbackInProgress() {
+        return this.getPlacementRollbackState() == NMSNetwork.PlacementRollbackState.IN_PROGRESS;
+    }
+
+    /**
+     * Return the native rollback state, preserving CLEAN/RESIDUAL after the
+     * adapter has released its native references.
+     */
+    public @NotNull NMSNetwork.PlacementRollbackState getPlacementRollbackState() {
+        var currentNetwork = this.network;
+        if (currentNetwork != null) {
+            var currentState = currentNetwork.getPlacementRollbackState();
+            if (currentState == NMSNetwork.PlacementRollbackState.IN_PROGRESS) {
+                return currentState;
+            }
+            if (currentState == NMSNetwork.PlacementRollbackState.RESIDUAL) {
+                this.placementRollbackState = currentState;
+            } else if (currentState == NMSNetwork.PlacementRollbackState.CLEAN
+                    && this.placementRollbackState == NMSNetwork.PlacementRollbackState.NOT_STARTED) {
+                this.placementRollbackState = currentState;
+            }
+        }
+        return this.placementRollbackState;
+    }
+
+    /** Record that native rollback already caused the quit event. */
+    public void markPlacementRollbackQuitObserved() {
+        this.placementRollbackQuitObserved.set(true);
+    }
+
+    public boolean wasPlacementRollbackQuitObserved() {
+        return this.placementRollbackQuitObserved.get();
+    }
+
     /**
      * 将假人传送到指定位置
      *
@@ -302,6 +386,13 @@ public class Fakeplayer {
      * asynchronous spawn completion as well as from the quit cleanup path.
      */
     public void close() {
+        var currentNetwork = this.network;
+        var rollbackState = this.getPlacementRollbackState();
+        if (rollbackState == NMSNetwork.PlacementRollbackState.IN_PROGRESS) {
+            // Native placement rollback owns every cleanup operation until it
+            // publishes its final CLEAN/RESIDUAL state.
+            return;
+        }
         this.ticker.stop();
         try {
             actionManager.cleanup(this.player);
@@ -309,9 +400,8 @@ public class Fakeplayer {
             // A retired Folia entity scheduler must not prevent the network
             // itself from being released below.
         }
-        var currentNetwork = this.network;
         this.network = null;
-        if (currentNetwork != null) {
+        if (currentNetwork != null && rollbackState == NMSNetwork.PlacementRollbackState.NOT_STARTED) {
             try {
                 currentNetwork.close();
             } catch (Throwable ignored) {

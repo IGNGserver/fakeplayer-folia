@@ -14,6 +14,7 @@ import io.github.hello09x.fakeplayer.core.listener.FakeplayerLifecycleListener;
 import io.github.hello09x.fakeplayer.core.listener.FakeplayerListener;
 import io.github.hello09x.fakeplayer.core.listener.PlayerListener;
 import io.github.hello09x.fakeplayer.core.lifecycle.LifecycleCommandCoordinator;
+import io.github.hello09x.fakeplayer.core.lifecycle.FakeplayerShutdownCoordinator;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerAutofishManager;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerManager;
 import io.github.hello09x.fakeplayer.core.manager.FakeplayerReplenishManager;
@@ -34,6 +35,7 @@ public final class Main extends JavaPlugin {
     private static Main instance;
 
     private Injector injector;
+    private FakeplayerShutdownCoordinator shutdownCoordinator;
 
     private long loadAt;
 
@@ -45,56 +47,151 @@ public final class Main extends JavaPlugin {
 
     @Override
     public void onEnable() {
-        injector = Guice.createInjector(
-                new FakeplayerModule(),
-                new CommandModule(),
-                new DatabaseModule(),
-                new TranslationModule(new TranslationConfig(
-                        "message/message",
-                        TranslatorUtils.getDefaultLocale(Main.getInstance())))
-        );
+        // Bukkit can invoke onEnable again after a plugin reload. A shutdown
+        // coordinator is intentionally one-shot, so each enable cycle gets a
+        // fresh Main-owned instance and a fresh set of initialized actions.
+        var coordinator = new FakeplayerShutdownCoordinator(this);
+        this.shutdownCoordinator = coordinator;
+        try {
+            // This listener is Main-owned and has no Guice dependencies. It
+            // must be present before any injectable enable step can fail.
+            coordinator.register();
 
-        // Recover write-ahead lifecycle finalizers before commands, listeners,
-        // or plugin messaging can create new externally visible state. A
-        // failed recovery aborts enable and retains its journal for retry.
-        injector.getInstance(FakeplayerConfig.class);
-        injector.getInstance(LifecycleCommandCoordinator.class).recoverPendingSynchronously();
+            injector = Guice.createInjector(
+                    new FakeplayerModule(),
+                    new CommandModule(),
+                    new DatabaseModule(),
+                    new TranslationModule(new TranslationConfig(
+                            "message/message",
+                            TranslatorUtils.getDefaultLocale(Main.getInstance())))
+            );
 
-        injector.getInstance(CommandRegistry.class).register();
-        {
-            var messenger = getServer().getMessenger();
-            messenger.registerOutgoingPluginChannel(this, "BungeeCord");
-            // Starts authoritative local cleanup. On BungeeCord the manager
-            // deliberately fail-closes without registering an incoming
-            // PlayerList listener.
-            injector.getInstance(WildFakeplayerManager.class);
-        }
+            var config = injector.getInstance(FakeplayerConfig.class);
+            var asyncExecutor = injector.getInstance(PluginAsyncExecutor.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.STOP_ASYNC,
+                    "plugin async executor",
+                    () -> {
+                        if (!asyncExecutor.shutdown()) {
+                            throw new IllegalStateException(
+                                    "fakeplayer async executor did not terminate within the shutdown barrier"
+                            );
+                        }
+                    }
+            );
 
-        {
-            var manager = getServer().getPluginManager();
-            manager.registerEvents(injector.getInstance(PlayerListener.class), this);
-            manager.registerEvents(injector.getInstance(FakeplayerLifecycleListener.class), this);
-            manager.registerEvents(injector.getInstance(FakeplayerListener.class), this);
-            manager.registerEvents(injector.getInstance(FakeplayerAutofishManager.class), this);
-            manager.registerEvents(injector.getInstance(FakeplayerReplenishManager.class), this);
-            manager.registerEvents(injector.getInstance(InvseeManager.class), this);
-        }
+            var lifecycleCoordinator = injector.getInstance(LifecycleCommandCoordinator.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.STOP_ACCEPTING,
+                    "lifecycle coordinator",
+                    lifecycleCoordinator::beginShutdown
+            );
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.RECOVER_JOURNAL,
+                    "lifecycle journal",
+                    lifecycleCoordinator::recoverPendingSynchronously
+            );
 
-        {
-            var placeholderExpansion = injector.getInstance(FakeplayerPlaceholderExpansion.class);
-            if (placeholderExpansion != null) {
-                if (placeholderExpansion.register()) {
-                    getServer().getPluginManager().registerEvents(placeholderExpansion, this);
-                    getLogger().info("Successfully registered PlaceholderExpansion");
+            // Recover write-ahead lifecycle finalizers before commands,
+            // listeners, or plugin messaging can create new externally visible
+            // state. A failed recovery aborts enable and retains its journal.
+            lifecycleCoordinator.recoverPendingSynchronously();
+
+            // Eagerly initialize and register every component that owns a
+            // shutdown action before CommandAPI or later enable steps run.
+            // Shutdown never calls injector.getInstance(), so partial enable
+            // failures cannot lazily create a scheduler after disable.
+            var fakeplayerManager = injector.getInstance(FakeplayerManager.class);
+            var lifecycleListener = injector.getInstance(FakeplayerLifecycleListener.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.STOP_ACCEPTING,
+                    "lifecycle delayed tasks",
+                    lifecycleListener::onDisable
+            );
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.STOP_ACCEPTING,
+                    "fake-player manager",
+                    fakeplayerManager::beginShutdown
+            );
+            var invseeManager = injector.getInstance(InvseeManager.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.CLEANUP,
+                    "invsee sessions",
+                    invseeManager::onDisable
+            );
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.CLEANUP,
+                    "fake-player manager resources",
+                    fakeplayerManager::onDisable
+            );
+
+            var actionManager = injector.getInstance(ActionManager.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.CLEANUP,
+                    "action manager",
+                    actionManager::onDisable
+            );
+
+            // Start authoritative local cleanup before command registration so
+            // a failed command registration still has a tracked cleanup path.
+            var wildFakeplayerManager = injector.getInstance(WildFakeplayerManager.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.CLEANUP,
+                    "wild fake-player manager",
+                    wildFakeplayerManager::onDisable
+            );
+
+            var usedIdRepository = injector.getInstance(UsedIdRepository.class);
+            coordinator.add(
+                    FakeplayerShutdownCoordinator.Phase.CLEANUP,
+                    "used-id repository",
+                    usedIdRepository::onDisable
+            );
+
+            injector.getInstance(CommandRegistry.class).register();
+            {
+                var messenger = getServer().getMessenger();
+                messenger.registerOutgoingPluginChannel(this, "BungeeCord");
+            }
+
+            {
+                var manager = getServer().getPluginManager();
+                manager.registerEvents(injector.getInstance(PlayerListener.class), this);
+                manager.registerEvents(lifecycleListener, this);
+                manager.registerEvents(injector.getInstance(FakeplayerListener.class), this);
+                manager.registerEvents(injector.getInstance(FakeplayerAutofishManager.class), this);
+                manager.registerEvents(injector.getInstance(FakeplayerReplenishManager.class), this);
+                manager.registerEvents(invseeManager, this);
+            }
+
+            {
+                var placeholderExpansion = injector.getInstance(FakeplayerPlaceholderExpansion.class);
+                if (placeholderExpansion != null) {
+                    if (placeholderExpansion.register()) {
+                        getServer().getPluginManager().registerEvents(placeholderExpansion, this);
+                        getLogger().info("Successfully registered PlaceholderExpansion");
+                    }
                 }
             }
-        }
 
-        if (injector.getInstance(FakeplayerConfig.class).isCheckForUpdates()) {
-            checkForUpdatesAsync();
-        }
+            if (config.isCheckForUpdates()) {
+                checkForUpdatesAsync();
+            }
 
-        getLogger().info("Enabled in %d ms".formatted(System.currentTimeMillis() - loadAt));
+            getLogger().info("Enabled in %d ms".formatted(System.currentTimeMillis() - loadAt));
+        } catch (Throwable failure) {
+            // Handle an enable failure while the plugin is still enabled, then
+            // let Paper's subsequent PluginDisableEvent call the same idempotent
+            // coordinator as a fallback.
+            coordinator.shutdown();
+            if (failure instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (failure instanceof Error error) {
+                throw error;
+            }
+            throw new IllegalStateException("Fakeplayer failed to enable", failure);
+        }
     }
 
     public void checkForUpdatesAsync() {
@@ -130,18 +227,12 @@ public final class Main extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        var currentInjector = this.injector;
-        if (currentInjector != null) {
-            Exceptions.suppress(this, () -> currentInjector.getInstance(FakeplayerLifecycleListener.class).onDisable());
-            var fakeplayerManager = currentInjector.getInstance(FakeplayerManager.class);
-            Exceptions.suppress(this, fakeplayerManager::beginShutdown);
-            // Cancel/interrupt database continuations before synchronously
-            // recovering their write-ahead journal.
-            Exceptions.suppress(this, () -> currentInjector.getInstance(PluginAsyncExecutor.class).shutdown());
-            Exceptions.suppress(this, fakeplayerManager::onDisable);
-            Exceptions.suppress(this, () -> currentInjector.getInstance(ActionManager.class).onDisable());
-            Exceptions.suppress(this, () -> currentInjector.getInstance(WildFakeplayerManager.class).onDisable());
-            Exceptions.suppress(this, () -> currentInjector.getInstance(UsedIdRepository.class).onDisable());
+        // PluginDisableEvent invokes this same coordinator at LOWEST before
+        // dependency listeners close the datasource. The call is idempotent
+        // for runtimes that invoke JavaPlugin#onDisable afterwards.
+        var coordinator = this.shutdownCoordinator;
+        if (coordinator != null) {
+            coordinator.shutdown();
         }
         {
             Exceptions.suppress(this, () -> {

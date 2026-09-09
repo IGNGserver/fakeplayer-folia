@@ -187,8 +187,25 @@ public class FakeplayerManager {
                                             // after every fallible spawn/login/teleport stage
                                             // has completed. PlayerJoinEvent no longer owns
                                             // external lifecycle command dispatch.
-                                            .thenCompose(ignored -> this.lifecycleCoordinator.activateAsync(handle))
+                                            .thenCompose(ignored -> {
+                                                if (this.playerList.getByUUID(fp.getUUID()) != fp) {
+                                                    throw new IllegalStateException(
+                                                            "Fake-player spawn was revoked before activation: " + fp.getName()
+                                                    );
+                                                }
+                                                return this.lifecycleCoordinator.activateAsync(handle);
+                                            })
                                             .thenApply(ignored -> {
+                                                if (this.playerList.getByUUID(fp.getUUID()) != fp) {
+                                                    throw new IllegalStateException(
+                                                            "Fake-player spawn was revoked during activation: " + fp.getName()
+                                                    );
+                                                }
+                                                if (!fp.markSpawnCommitted()) {
+                                                    throw new IllegalStateException(
+                                                            "Fake-player spawn was finalized before activation: " + fp.getName()
+                                                    );
+                                                }
                                                 this.runCommittedSpawnHooks(fp);
                                                 return fp.getPlayer();
                                             });
@@ -412,7 +429,7 @@ public class FakeplayerManager {
             return;
         }
         try {
-            this.nameManager.unregister(fakeplayer.getSequenceName());
+            this.releaseNameUnlessResidual(fakeplayer);
             if (config.isDropInventoryOnQuiting()) {
                 this.nms.createAction(
                         fakeplayer.getPlayer(),
@@ -425,6 +442,29 @@ public class FakeplayerManager {
             // any exception in name or inventory cleanup. Always release the network.
             fakeplayer.close();
         }
+    }
+
+    /**
+     * Remove a player that was inserted into the native PlayerList while its
+     * spawn transaction was still pending. The spawn failure continuation
+     * owns the durable journal rollback; this method owns only the registry,
+     * name, action, and network resources.
+     */
+    public void cleanupFailedPlacement(@NotNull Fakeplayer fakeplayer) {
+        fakeplayer.markSpawnFailed();
+        this.playerList.remove(fakeplayer);
+        this.lifecycleTransactions.remove(fakeplayer);
+        this.commandChains.remove(fakeplayer);
+        this.quittingFakeplayers.remove(fakeplayer);
+        var afterSpawnTask = this.afterSpawnTasks.remove(fakeplayer);
+        if (afterSpawnTask != null) {
+            afterSpawnTask.cancel();
+        }
+        // Native PlayerList removal and this event can race with the spawn
+        // continuation. Name ownership and local resources are both released
+        // on every path, while the per-instance guard prevents double return.
+        this.releaseNameUnlessResidual(fakeplayer);
+        fakeplayer.close();
     }
 
     /**
@@ -794,9 +834,8 @@ public class FakeplayerManager {
     }
 
     /**
-     * Finalize durable external state after async workers have stopped, then
-     * release in-memory/native resources. Recovery runs synchronously because
-     * schedulers cannot be relied upon once plugin disable has begun.
+     * Release in-memory/native resources after the shutdown coordinator has
+     * stopped async workers and recovered the durable lifecycle journal.
      */
     public void onDisable() {
         this.beginShutdown();
@@ -804,25 +843,13 @@ public class FakeplayerManager {
             return;
         }
         this.shutdownFinalized = true;
-        try {
-            this.lifecycleCoordinator.recoverPendingSynchronously();
-        } catch (Throwable recoveryFailure) {
-            // The journal is intentionally retained. A later enable refuses
-            // unsafe startup until every idempotent finalizer succeeds.
-            log.severe("Lifecycle finalization remains pending and will be retried on next startup: "
-                    + recoveryFailure);
-        }
 
         var reason = text(REMOVAL_REASON_PREFIX + "Plugin disabled");
         for (var fakeplayer : this.playerList.getAll()) {
             if (!this.playerList.remove(fakeplayer)) {
                 continue;
             }
-            try {
-                this.nameManager.unregister(fakeplayer.getSequenceName());
-            } catch (Throwable unregisterFailure) {
-                log.warning("Failed to release fake-player name " + fakeplayer.getName() + ": " + unregisterFailure);
-            }
+            this.releaseNameUnlessResidual(fakeplayer);
             this.commandChains.remove(fakeplayer);
             try {
                 var player = fakeplayer.getPlayer();
@@ -851,14 +878,39 @@ public class FakeplayerManager {
     }
 
     private void rollbackSpawn(@NotNull Fakeplayer fakeplayer, @NotNull Throwable throwable) {
-        this.playerList.remove(fakeplayer);
+        fakeplayer.markSpawnFailed();
+        var afterSpawnTask = this.afterSpawnTasks.remove(fakeplayer);
+        if (afterSpawnTask != null) {
+            afterSpawnTask.cancel();
+        }
+        boolean removed = this.playerList.remove(fakeplayer);
         this.lifecycleTransactions.remove(fakeplayer);
         this.commandChains.remove(fakeplayer);
         this.quittingFakeplayers.remove(fakeplayer);
-        try {
-            this.nameManager.unregister(fakeplayer.getSequenceName());
-        } catch (Throwable unregisterFailure) {
-            log.warning("Failed to release fake-player name " + fakeplayer.getName() + ": " + unregisterFailure);
+
+        var placementRollbackState = fakeplayer.getPlacementRollbackState();
+        var rollbackQuitObserved = fakeplayer.wasPlacementRollbackQuitObserved();
+        if (placementRollbackState != io.github.hello09x.fakeplayer.api.spi.NMSNetwork.PlacementRollbackState.NOT_STARTED
+                || rollbackQuitObserved) {
+            // NMS placement rollback is the sole native teardown owner once it
+            // has started. Its PlayerQuitEvent is deliberately only observed
+            // by the listener; this continuation must never kick or close the
+            // same native connection a second time.
+            this.releaseNameUnlessResidual(fakeplayer);
+            fakeplayer.close();
+            log.warning("Failed to spawn fake player " + fakeplayer.getName() + ": " + throwable);
+            return;
+        }
+
+        this.releaseNameUnlessResidual(fakeplayer);
+        if (!removed) {
+            // The dedicated native placement rollback may already have fired
+            // PlayerQuitEvent, whose failed-placement handler removed this
+            // record and closed the network. Do not kick a second time or
+            // create a second quit lifecycle for that already finalized entry.
+            fakeplayer.close();
+            log.warning("Failed to spawn fake player " + fakeplayer.getName() + ": " + throwable);
+            return;
         }
 
         var player = fakeplayer.getPlayer();
@@ -890,6 +942,34 @@ public class FakeplayerManager {
             fakeplayer.close();
         }
         log.warning("Failed to spawn fake player " + fakeplayer.getName() + ": " + throwable);
+    }
+
+    /**
+     * Return a sequence slot only after native placement rollback has reached a
+     * final result. A residual native player/list/connection state permanently
+     * quarantines the name for this process instead of allowing reuse.
+     */
+    private void releaseNameUnlessResidual(@NotNull Fakeplayer fakeplayer) {
+        if (fakeplayer.isPlacementRollbackInProgress()) {
+            return;
+        }
+        var residual = fakeplayer.hasPlacementRollbackResidual();
+        if (!fakeplayer.markNameReleased()) {
+            return;
+        }
+        if (residual) {
+            this.nameManager.quarantine(fakeplayer.getSequenceName());
+            log.severe(
+                    "Quarantined fake-player name " + fakeplayer.getName()
+                            + " because NMS placement rollback left residual state"
+            );
+            return;
+        }
+        try {
+            this.nameManager.unregister(fakeplayer.getSequenceName());
+        } catch (Throwable unregisterFailure) {
+            log.warning("Failed to release fake-player name " + fakeplayer.getName() + ": " + unregisterFailure);
+        }
     }
 
     private record SpawnContext(
