@@ -46,6 +46,12 @@
             <artifactId>fakeplayer-v26_1_2</artifactId>
             <version>${revision}</version>
         </dependency>
+
+        <dependency>
+            <groupId>io.github.hello09x.fakeplayer</groupId>
+            <artifactId>fakeplayer-v26_2</artifactId>
+            <version>${revision}</version>
+        </dependency>
     </dependencies>
 
     <build>

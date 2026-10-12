@@ -8,11 +8,11 @@
 
 FakePlayer 可以在服务器内部创建一个能够被原版系统和其他插件识别的假人。假人可以保持区块加载、执行服务器命令、携带物品、进行移动和交互动作，也可以作为自动化测试、红石机器、刷怪区域和插件联动的运行载体。
 
-本分支重点解决 Folia 的多区域调度问题，并为 Minecraft 1.21.11 与 26.1.x 提供独立的运行时适配器。
+本分支重点解决 Folia 的多区域调度问题，并为 Minecraft 1.21.11 与 26.x 提供独立的运行时适配器。
 
 ## 当前版本
 
-当前正式版本为 [v0.3.19-folia.4](https://github.com/IGNGserver/fakeplayer-folia/releases/tag/v0.3.19-folia.4)。
+当前正式版本为 [v0.3.19-folia.5](https://github.com/IGNGserver/fakeplayer-folia/releases/tag/v0.3.19-folia.5)。
 
 Folia 跨区域查看假人背包时使用查看者区域的只读镜像；同区域查看以及 Paper/Purpur 仍保持正常可编辑行为。
 
@@ -21,7 +21,7 @@ Folia 跨区域查看假人背包时使用查看者区域的只读镜像；同�
 这个版本包含：
 
 - Folia 的实体、区域、全局和异步调度适配。
-- Minecraft 1.21.11 与 26.1.x 的现代运行时适配。
+- Minecraft 1.21.11 与 26.x 的现代运行时适配。
 - 假人生成数量限制、名称来源校验和 BungeeCord 在线玩家列表解析。
 - 跨区域背包查看的安全处理，以及关闭和销毁流程的兼容修复。
 - 配套的 Maven Wrapper、单元测试、静态安全检查和 CI 构建验证。
@@ -34,9 +34,11 @@ Folia 跨区域查看假人背包时使用查看者区域的只读镜像；同�
 | Folia | 1.21.11-14 | 21 | 真实服务端通过 |
 | Paper | 26.1.2-74 | 25 | 真实服务端通过 |
 | Folia | 26.1.2-8 | 25 | 真实服务端通过 |
+| Paper | 26.2 | 25 | 使用反射适配器 |
+| Folia | 26.2 | 25 | 真实服务端通过（Arbor 26.2） |
 | Purpur | 对应 Paper 版本 | 21/25 | 使用前请按目标版本单独验证 |
 
-说明：发布 JAR 是现代发行包，主要面向 1.21.11 和 26.1.x。更早的 1.20.x–1.21.10 版本仍保留对应模块，但完整打包需要在本地使用 BuildTools 准备重映射依赖，详见 [`BUILD.md`](BUILD.md)。
+说明：发布 JAR 是现代发行包，主要面向 1.21.11 和 26.x。更早的 1.20.x–1.21.10 版本仍保留对应模块，但完整打包需要在本地使用 BuildTools 准备重映射依赖，详见 [`BUILD.md`](BUILD.md)。
 
 ## 安装
 
@@ -230,14 +232,14 @@ Folia 不存在可随意访问所有实体的传统主线程。本分支会根�
 构建现代发行包需要 JDK 21、Maven 3.8+ 或仓库内置的 Maven Wrapper：
 
 ```bash
-./mvnw -B -ntp -Drevision=0.3.19-folia.4 \
+./mvnw -B -ntp -Drevision=0.3.19-folia.5 \
     -pl fakeplayer-modern-dist -am clean verify
 ```
 
 产物路径：
 
 ```text
-fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.4.jar
+fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.5.jar
 ```
 
 现代发行包不需要手动准备根目录 `lib/`。旧版本模块的完整打包需要本地运行 BuildTools，具体步骤见 [`BUILD.md`](BUILD.md)。
@@ -250,7 +252,8 @@ fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.4.jar
 - Folia 1.21.11-14：Java 21，区域调度、远坐标生成、销毁和关服通过。
 - Paper 26.1.2-74：Java 25，选择 `v26_1_2` bridge，完整烟测通过。
 - Folia 26.1.2-8：Java 25，选择 `v26_1_2` bridge，完整烟测通过。
-- 单元测试：7 个通过，0 个失败。
+- Arbor 26.2（Folia 分支）：Java 25，选择 `v26_2` bridge，完整烟测通过。
+- 单元测试：54 个通过，0 个失败。
 - CI：构建、静态安全检查和 ServiceLoader provider 检查通过。
 
 这些是集成烟测，不等同于完整漏洞审计，也不覆盖真实客户端 UI、所有权限组合、皮肤显示和所有可选插件组合。

@@ -6,7 +6,7 @@
 [![最新版本](https://img.shields.io/github/v/release/IGNGserver/fakeplayer-folia)](https://github.com/IGNGserver/fakeplayer-folia/releases)
 [![许可证](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE.txt)
 
-这是 [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer) 的 Folia 移植分支，保留上游功能，并补充 Folia 调度器适配、Minecraft 1.21.11 与已验证的 26.1.2 适配。
+这是 [tanyaofei/minecraft-fakeplayer](https://github.com/tanyaofei/minecraft-fakeplayer) 的 Folia 移植分支，保留上游功能，并补充 Folia 调度器适配、Minecraft 1.21.11 与已验证的 26.1.2 / 26.2 适配。
 
 FakePlayer 会在服务器中创建一个对 Bukkit/Paper/插件而言都像真实玩家的假人，可用于区块加载、刷怪、自动化操作和插件联动。
 
@@ -18,10 +18,12 @@ FakePlayer 会在服务器中创建一个对 Bukkit/Paper/插件而言都像真�
 | Folia | 1.21.x（包含 1.21.11） | 支持，使用区域调度器 |
 | Paper / Purpur | 26.1.2 | 使用反射适配器，已实测 |
 | Folia | 26.1.2 | 使用反射适配器，已实测 |
+| Paper / Purpur | 26.2 | 使用反射适配器 |
+| Folia | 26.2（Arbor） | 使用反射适配器，已实测 |
 
 运行要求：
 
-- Minecraft 1.20.x–1.21.11 使用 Java 21；Minecraft 26.1.2 使用 Java 25。
+- Minecraft 1.20.x–1.21.11 使用 Java 21；Minecraft 26.x 使用 Java 25。
 - Paper、Purpur 或 Folia 服务端。
 - [CommandAPI 11.2.0](https://commandapi.jorel.dev)（必需）。
 - [OpenInv](https://github.com/Jikoo/OpenInv) 和 [PlaceholderAPI](https://www.spigotmc.org/resources/placeholderapi.6245/) 为可选联动插件。
@@ -177,11 +179,11 @@ self-commands:
 现代发行版推荐使用以下命令：
 
 ```bash
-./mvnw -B -ntp -Drevision=0.3.19-folia.4 \
+./mvnw -B -ntp -Drevision=0.3.19-folia.5 \
     -pl fakeplayer-modern-dist -am clean verify
 ```
 
-产物位于 `fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.4.jar`。现代发行版不需要手动准备根目录 `lib/`，OpenInv、PlaceholderAPI 和 CommandAPI 仍由服务器单独安装。
+产物位于 `fakeplayer-modern-dist/target/fakeplayer-0.3.19-folia.5.jar`。现代发行版不需要手动准备根目录 `lib/`，OpenInv、PlaceholderAPI 和 CommandAPI 仍由服务器单独安装。
 
 旧版本完整构建需要使用 BuildTools 准备对应的重映射 NMS 依赖。详细说明见 [`BUILD.md`](BUILD.md)。
 
